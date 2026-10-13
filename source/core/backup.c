@@ -32,6 +32,7 @@ const char *dsave_result_str(DsaveResult r)
         case DSAVE_ERR_WRONG_GAME:    return "Backup is for another game";
         case DSAVE_ERR_EXISTS:        return "That name is already used";
         case DSAVE_ERR_ROLLED_BACK:   return "Restore failed; old save kept";
+        case DSAVE_ERR_UNSUPPORTED:   return "Not supported by this kernel";
     }
     return "Unknown error";
 }
@@ -384,6 +385,23 @@ long backup_restore_length(const char *backup_file, long backup_size, long live_
 DsaveResult backup_restore_to(const Library *lib, Game *game, const Backup *b, int loc,
                               Backup *auto_backup)
 {
+    library_refresh_game(lib, game);
+    if (loc < 0)
+        loc = game->primary;
+    if (loc >= game->loc_count)
+    {
+        if (auto_backup)
+            memset(auto_backup, 0, sizeof(*auto_backup));
+        return DSAVE_ERR_PATH;
+    }
+    char path[DSAVE_PATH_MAX];
+    snprintf(path, sizeof(path), "%s", game->locs[loc].path);
+    return backup_restore_path(lib, game, b, path, auto_backup);
+}
+
+DsaveResult backup_restore_path(const Library *lib, Game *game, const Backup *b,
+                                const char *path, Backup *auto_backup)
+{
     if (auto_backup)
         memset(auto_backup, 0, sizeof(*auto_backup));
 
@@ -393,12 +411,11 @@ DsaveResult backup_restore_to(const Library *lib, Game *game, const Backup *b, i
     if (b->game_code[0] && strcmp(b->game_code, game->info.game_code) != 0)
         return DSAVE_ERR_WRONG_GAME;
 
-    library_refresh_game(lib, game);
-    if (loc < 0)
-        loc = game->primary;
-    if (loc >= game->loc_count)
-        return DSAVE_ERR_PATH;
-    const SaveLoc target = game->locs[loc];
+    struct {
+        const char *path;
+        bool exists;
+        long size;
+    } target = { path, file_exists(path), file_size(path) };
 
     long backup_size = file_size(b->file);
     long len = backup_restore_length(b->file, backup_size, target.exists ? target.size : -1);

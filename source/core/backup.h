@@ -30,6 +30,7 @@ typedef enum {
     DSAVE_ERR_WRONG_GAME,     // Backup was made for a different game code
     DSAVE_ERR_EXISTS,         // Target name is already taken
     DSAVE_ERR_ROLLED_BACK,    // Restore failed verification; old save put back
+    DSAVE_ERR_UNSUPPORTED,    // The kernel has no such feature
 } DsaveResult;
 
 const char *dsave_result_str(DsaveResult r);
@@ -81,6 +82,10 @@ DsaveResult backup_restore(const Library *lib, Game *game, const Backup *b,
 // primary save.
 DsaveResult backup_restore_to(const Library *lib, Game *game, const Backup *b, int loc,
                               Backup *auto_backup);
+
+// Same, onto any save file path of this game (e.g. a TWiLight slot file).
+DsaveResult backup_restore_path(const Library *lib, Game *game, const Backup *b,
+                                const char *path, Backup *auto_backup);
 
 // How long the restored file will be. Kernels pad saves (TWiLight and Pico
 // both default to 512 KB filled with 0xFF), so:
