@@ -102,7 +102,9 @@ static void draw_top(void)
 {
     consoleSelect(&top_screen);
     consoleClear();
-    printf("\x1b[36mDSavE " APP_VERSION "\x1b[39m  %s\n", library_loader_name(lib.loader));
+    KernelId k = lib.kernels.active;
+    printf("\x1b[36mDSavE " APP_VERSION "\x1b[39m  %s%s\n", kernel_name(k),
+           kernel_hw_tested(k) ? "" : " \x1b[37m(untested)\x1b[39m");
     printf("--------------------------------");
 
     Game *g = current_game();
@@ -118,9 +120,17 @@ static void draw_top(void)
     put_clipped(g->title, COLS);
     printf("\nGame code: %s\n", g->info.game_code);
     printf("Save: %s%s\n", size, g->has_save ? "" : " (not created yet)");
+    if (g->chip_size > 0 && g->save_size > g->chip_size)
+    {
+        char chip[16];
+        format_size(g->chip_size, chip, sizeof(chip));
+        printf("\x1b[37m(chip is %s, rest is padding)\x1b[39m\n", chip);
+    }
     printf("\x1b[37m");
     put_clipped(g->save_path, COLS);
     printf("\x1b[39m\n");
+    if (g->primary_is_fallback)
+        printf("\x1b[33mUsing another kernel's save\x1b[39m\n");
 
     if (view == VIEW_BACKUPS && backup_sel > 0)
     {
@@ -167,7 +177,7 @@ static void draw_bottom(void)
         }
         printf("\x1b[21;0H--------------------------------");
         printf("A: backups   X: quick backup\n");
-        printf("START: rescan     * = has save");
+        printf("L/R: kernel  START: rescan");
     }
     else
     {
@@ -462,6 +472,17 @@ int main(int argc, char **argv)
                 do_backup(NULL);
             if (k & KEY_START)
                 rescan();
+            if (k & (KEY_L | KEY_R))
+            {
+                KernelId next = kernels_cycle(&lib.kernels, (k & KEY_L) ? -1 : 1);
+                if (next != lib.kernels.active)
+                {
+                    library_set_kernel(&lib, next);
+                    char msg[COLS * 2 + 1];
+                    snprintf(msg, sizeof(msg), "Kernel: %s", kernel_name(next));
+                    set_status(false, msg);
+                }
+            }
         }
         else
         {

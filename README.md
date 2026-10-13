@@ -4,26 +4,29 @@ A save manager for the Nintendo DS family that runs on the console itself, in
 the spirit of Checkpoint and JKSM. Back up, restore, name and export your game
 saves without a PC.
 
-> **Status: early.** This is the save engine with a simple text front end. The
-> dual-screen tile UI, compression and physical-cartridge saves are still to
+> **Status: early.** This is the save engine with a simple text front end.
+> The dual-screen UI, compression and physical-cartridge saves are still to
 > come (see [Roadmap](#roadmap)). It has not been tested on hardware yet, so
 > keep your own copy of anything precious.
 
 ## What it does
 
-- **Finds your games.** Scans the SD card for `.nds` files and pairs each with
-  its save, whichever loader you use:
+- **Finds your games and their saves, whichever kernel you use.** DSavE
+  detects every kernel on the card and applies each one's save rules,
+  including its settings files and save slots:
 
-  | Loader | Detected by | Save location |
+  | Kernel | Detected by | Default save location |
   |---|---|---|
-  | TWiLight Menu++ / nds-bootstrap | `_nds/TWiLightMenu/` | `<rom folder>/saves/<rom>.sav` |
-  | Wood R4 | `__rpg/` | `<rom>.sav` beside the ROM |
+  | Pico Launcher (DSpico) | `_pico/` | `<rom>.sav` beside the ROM |
+  | TWiLight Menu++ | `_nds/TWiLightMenu/` | `<rom folder>/saves/<rom>.sav` |
+  | akmenu-next | `_nds/akmenunext/` | `<rom>.sav` beside the ROM |
+  | Wood R4 *(untested)* | `__rpg/` | `<rom>.sav` beside the ROM |
   | YSMenu | `TTMenu/` | `<rom>.sav` beside the ROM |
   | AKAIO | `__aio/` | `<rom>.sav` beside the ROM |
-  | Anything else | | `<rom>.sav` beside the ROM |
 
-  Every layout is checked for every game, so a save left behind by another
-  loader is still found.
+  When several kernels share a card, press L/R to pick the one you launch
+  games with. See [docs/kernels.md](docs/kernels.md) for every rule and its
+  source.
 
 - **Keeps as many backups as you like**, each with a name (a timestamp by
   default). Backups are raw `.sav` files, so emulators and PC save editors can
@@ -38,11 +41,12 @@ saves without a PC.
 
 - **Restores safely.**
   1. The backup's size and CRC-32 are checked against `backup.ini`, and its
-     game code and size must match the game. A corrupt, truncated or
-     wrong-game backup is refused before anything is written.
+     game code must match the game. A corrupt, truncated or wrong-game
+     backup is refused before anything is written.
   2. The current save is backed up automatically (`auto_<timestamp>`).
   3. The save is overwritten in place, so flashcarts that need a contiguous,
-     pre-allocated save file (Wood R4) keep working.
+     pre-allocated save file (Wood R4) keep working. If the kernel padded
+     the save (Pico and TWiLight pad to 512 KB), the padding is kept.
   4. The result is read back and compared. If it does not match, the old save
      is put back.
 
@@ -57,6 +61,7 @@ saves without a PC.
 | Games | Up/Down, Left/Right | Move, page |
 | | A | Open the game's backups |
 | | X | Quick backup (timestamp name) |
+| | L/R | Switch the active kernel |
 | | START | Rescan the SD card |
 | Backups | A on *New backup* | Back up now |
 | | Y on *New backup* | Back up with a name |
@@ -89,16 +94,19 @@ make -C tests
 
 ## Roadmap
 
-1. **Engine** (this release): SD scan, loader detection, backup, restore,
-   rename, trash, export.
-2. **Compression**: optional zlib-compressed archives alongside the raw
-   `.sav`.
-3. **Dual-screen UI**: game info and backup history on top, touch list and
-   button actions on the bottom.
-4. **Release**: hardware testing on DS Lite and DSi, then a tagged release.
+1. **Kernel profiles** (this release): Pico Launcher, TWiLight Menu++,
+   akmenu-next, Wood R4, YSMenu and AKAIO save rules, plus backup, restore,
+   rename, trash and export.
+2. **Cross-kernel tools**: spot out-of-sync copies of a save when several
+   kernels share a card, copy a save into another kernel's layout, and switch
+   TWiLight save slots.
+3. **Dual-screen UI**: game info and backup history on top, a touch list and
+   button actions on the bottom, plus optional compressed backups.
+4. **Release**: hardware testing on DSpico and Ace3DS X, then a tagged
+   release.
 
-Later: physical cartridge saves (DSi with Unlaunch, DS Lite hot-swap), DSiWare
-`.pub`/`.prv` saves, and format conversion (`.dsv`, `.duc`, no$gba).
+Later: physical cartridge saves (DSi with Unlaunch, DS Lite hot-swap),
+DSiWare `.pub`/`.prv` saves, and format conversion (`.dsv`, `.duc`, no$gba).
 
 ## License
 

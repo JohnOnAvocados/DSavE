@@ -1,7 +1,7 @@
 # Host build of the save engine plus its tests: `make -C tests`
 CC ?= cc
 CFLAGS ?= -std=gnu99 -Wall -Wextra -Werror -Wno-format-truncation -O1 -g -fsanitize=address,undefined
-SRC := ../source/core/util.c ../source/core/rom.c ../source/core/library.c ../source/core/backup.c
+SRC := $(wildcard ../source/core/*.c)
 
 .PHONY: test clean
 test: test_core
