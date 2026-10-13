@@ -1,8 +1,9 @@
 // DSavE: a save manager for DS flashcarts, TWiLight Menu++ and Pico Launcher.
 //
-// This file is the DS side only: it sets both screens up as 16-bit bitmaps,
-// reads the buttons and stylus, and copies what source/ui draws to the
-// screens. Everything else is plain C that also runs on a PC (see tests/).
+// This file and source/platform are the DS side only: they set both screens
+// up as 16-bit bitmaps, read the buttons and stylus, copy what source/ui
+// draws to the screens, and drive slot 1. Everything else is plain C that
+// also runs on a PC (see tests/).
 
 #include <nds.h>
 #include <fat.h>
@@ -12,6 +13,7 @@
 #include <unistd.h>
 
 #include "core/library.h"
+#include "platform/card_slot.h"
 #include "ui/app.h"
 
 #define SAME_KEY(k) ((unsigned)UI_##k == (unsigned)k)
@@ -57,6 +59,14 @@ static void find_root(char *out, size_t size)
     snprintf(out, size, "%s", isDSiMode() ? "sd:/" : "fat:/");
 }
 
+// Shows a frame in the middle of long work (game card reads and writes).
+static void present_now(void *user)
+{
+    (void)user;
+    if (app_render(&app, &top, &bottom))
+        present();
+}
+
 static void fatal(const char *title, const char *text)
 {
     gfx_clear(&top, GFX_RGB(18, 20, 26));
@@ -93,7 +103,8 @@ int main(int argc, char **argv)
 
     char root[DSAVE_PATH_MAX];
     find_root(root, sizeof(root));
-    app_init(&app, &lib, root);
+    app_init(&app, &lib, root, card_slot_get(root));
+    app.present = present_now;
 
     while (true)
     {

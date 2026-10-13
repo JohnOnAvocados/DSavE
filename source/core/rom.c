@@ -127,6 +127,19 @@ void rom_parse(RomInfo *info, const uint8_t *hdr, const uint8_t *titles)
     snprintf(info->banner_title, sizeof(info->banner_title), "%s", first);
 }
 
+bool rom_header_crc_ok(const uint8_t *hdr)
+{
+    // CRC-16/MODBUS, as the DS BIOS's swiCRC16 computes it.
+    uint16_t crc = 0xFFFF;
+    for (int i = 0; i < 0x15E; i++)
+    {
+        crc ^= hdr[i];
+        for (int b = 0; b < 8; b++)
+            crc = (crc & 1) ? (uint16_t)((crc >> 1) ^ 0xA001) : (uint16_t)(crc >> 1);
+    }
+    return crc == (uint16_t)(hdr[0x15E] | (hdr[0x15F] << 8));
+}
+
 bool rom_read_info(const char *path, RomInfo *info)
 {
     memset(info, 0, sizeof(*info));
