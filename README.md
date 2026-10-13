@@ -40,8 +40,8 @@ saves without a PC.
   ```
   _DSavE/saves/<GAMECODE> <title>/<backup name>/<title>.sav
                                                /backup.ini   (size, CRC-32, date)
-  _DSavE/export/   exported copies
-  _DSavE/import/   .sav files to import as backups
+  _DSavE/export/   exported copies (<rom name>.sav or .dsv)
+  _DSavE/import/   saves to import as backups
   _DSavE/_TRASH_/  deleted backups (nothing is ever hard-deleted)
   ```
 
@@ -74,12 +74,26 @@ saves without a PC.
   to a few KB. Saves over 1 MB stay uncompressed, because the DS Lite has
   only 4 MB of RAM.
 
-- **Imports saves from a PC, an emulator or Checkpoint.** Put the `.sav`
-  (or `.dsv`, or `.sav.gz`) in `_DSavE/import/`, choose the game, then
-  *Import a .sav* under Y. The file becomes a backup named `import_<file>`,
-  which you can then restore. DeSmuME's `.dsv` footer is removed. DSavE
-  can't tell which game a raw `.sav` belongs to, so check you picked the right
-  one. no$gba saves are not supported yet.
+- **Imports saves from a PC, an emulator or Checkpoint.** Put the save in
+  `_DSavE/import/`, choose the game, then *Import a save* under Y. The file
+  becomes a backup named `import_<file>`, which you can then restore. A save
+  named after a ROM on the card (`Mario Kart DS.dsv` for `Mario Kart DS.nds`)
+  goes into that game, whichever game is selected. DSavE reads:
+
+  | Format | From |
+  |---|---|
+  | `.sav` (raw) | melonDS, flashcarts, Checkpoint, JKSM |
+  | `.dsv` | DeSmuME, DraStic (the footer is dropped) |
+  | `.sav` with a no$gba header | no$gba, packed or not |
+  | `.duc`, `.dss` | Action Replay DS save tools |
+  | `.sav.gz` | DSavE's own compressed backups |
+
+- **Exports saves for emulators.** Under Y, *Export .sav* writes the raw save
+  (melonDS, flashcarts) and *Export .dsv* adds DeSmuME's footer (DeSmuME,
+  DraStic). The file is named after the ROM, so it can go straight next to the
+  ROM or into the emulator's save folder, and replaces an earlier export of
+  that game. When the chip size is known (Pico's save list, or a game card),
+  a kernel's 0xFF padding is cut off so the emulator sees the right chip.
 
 - **Backs up and restores game cards, in DSi mode.** On a DSi, or a 3DS with
   TWiLight Menu++ or Unlaunch, start DSavE from the console's SD card and put a
@@ -108,7 +122,7 @@ Everything works with the buttons or the stylus.
 | | A | **Backup** the save now (named by date and time); on an empty game card row, check slot 1 again |
 | | B | **Restore** the chosen backup (hold A to confirm) |
 | | X | **Compress** or decompress the chosen backup |
-| | Y | **Rename/Delete**: rename, move to trash, export a `.sav` for PC, back up with a name, or import a `.sav` |
+| | Y | **Rename/Delete**: rename, move to trash, export a `.sav` or `.dsv` for emulators, back up with a name, or import a save |
 | | START | Menu: active kernel, compression, auto backups to keep, rescan, about |
 | | SELECT | Copies of this save across kernels, and TWiLight slots |
 | Copies | A on a copy | Copy the current save there (hold A) |
@@ -161,10 +175,11 @@ Pillow) into `source/ui/font_data.c`, which is committed.
    release.
 
 Since step 3: importing saves from a PC, keeping only the last few auto
-backups, and game card saves in DSi mode.
+backups, game card saves in DSi mode, the selected game's icon, and
+emulator saves (no$gba, Action Replay, `.dsv` export).
 
 Later: game cards on a DS Lite (hot-swap), the 8 MB Band Brothers DX chip,
-DSiWare `.pub`/`.prv` saves, and more formats (`.duc`, no$gba).
+and DSiWare `.pub`/`.prv` saves.
 
 ## License
 

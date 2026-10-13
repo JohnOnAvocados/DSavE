@@ -14,6 +14,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "emusave.h"
 #include "library.h"
 
 #define BACKUP_NAME_MAX 40
@@ -34,6 +35,7 @@ typedef enum {
     DSAVE_ERR_UNSUPPORTED,    // The kernel has no such feature
     DSAVE_ERR_CARD_CHANGED,   // The game card was removed or swapped
     DSAVE_ERR_CARD,           // The game card's save chip did not respond
+    DSAVE_ERR_DAMAGED,        // An import file's header or packed data is damaged
 } DsaveResult;
 
 const char *dsave_result_str(DsaveResult r);
@@ -117,11 +119,17 @@ DsaveResult backup_rename(const Library *lib, const Game *game, const Backup *b,
 // Move a backup to <root>/_DSavE/_TRASH_/ instead of deleting it.
 DsaveResult backup_trash(const Library *lib, const Game *game, const Backup *b);
 
-// Copy a backup's raw .sav to <root>/_DSavE/export/<title>_<CODE>_<name>.sav.
-// When Pico's save list gives the real chip size and the rest of the file is
-// 0xFF padding, the export is trimmed to the chip size so emulators detect
-// the right save type.
-DsaveResult backup_export(const Library *lib, const Game *game, const Backup *b,
+typedef enum {
+    EXPORT_SAV, // Raw: melonDS, flashcarts, Checkpoint and JKSM
+    EXPORT_DSV, // Raw plus DeSmuME's footer: DeSmuME and DraStic
+} ExportFormat;
+
+// Copy a backup to <root>/_DSavE/export/<ROM file name>.sav or .dsv, the
+// name emulators look for next to the ROM. An earlier export of the same
+// game is replaced. When the chip size is known (Pico's save list, or a
+// game card) and the rest of the file is only a kernel's 0xFF padding, the
+// export is trimmed to it so emulators detect the right save type.
+DsaveResult backup_export(const Library *lib, const Game *game, const Backup *b, ExportFormat format,
                           char *out_path, size_t out_size);
 
 // Name for a safety copy made before a restore: "auto_<timestamp>".
@@ -134,25 +142,28 @@ void backup_auto_name(char *out, size_t size);
 int backup_prune_auto(const Library *lib, const Game *game, int keep, const char *protect);
 
 // Saves from a PC, an emulator or another save manager (Checkpoint, JKSM)
-// are copied into <root>/_DSavE/import/ and imported as a backup of the
-// game the user picks. Raw .sav, DeSmuME .dsv (its footer is dropped) and
-// .sav.gz are accepted; no$gba saves are not.
+// are copied into <root>/_DSavE/import/ and imported as a backup. Raw .sav,
+// DeSmuME and DraStic .dsv, no$gba, Action Replay .duc/.dss and .sav.gz
+// files are read (see emusave.h).
 #define IMPORT_DIR "_DSavE/import"
 #define IMPORT_LIST_MAX 32
 
 typedef struct {
     char name[64];
     char path[DSAVE_PATH_MAX];
-    long size;       // Save data size, -1 if unreadable
-    bool valid;      // size is a DS save size
+    long size;        // Save data size, -1 if unreadable
+    bool valid;       // size is a DS save size
+    EmuFormat format;
+    int game;         // Index of the game whose ROM has the same file name, or -1
 } ImportFile;
 
 // List the files in the import folder (creating it), sorted by name.
 int backup_import_list(const Library *lib, ImportFile *out, int max);
 
 // Make a backup named "import_<file name>" from an import file. The file
-// is left where it is. DSavE cannot tell which game a raw save belongs to,
-// so the caller must ask the user.
+// is left where it is. A save's data doesn't say which game it is from, so
+// the caller picks the game: the one named after it (ImportFile.game), or
+// the user's choice.
 DsaveResult backup_import(const Library *lib, const Game *game, const char *path, Backup *out);
 
 #endif

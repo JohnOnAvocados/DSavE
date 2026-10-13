@@ -51,9 +51,14 @@
 #define MENU_ITEMS 5
 #define MENU_Y 28
 #define MENU_PITCH 24
-#define MORE_ITEMS 5
-#define MORE_Y 50
-#define MORE_PITCH 24
+#define MORE_ITEMS 6
+#define MORE_BOX_Y 12
+#define MORE_BOX_H 168
+#define MORE_Y 40
+#define MORE_PITCH 23
+
+// "More" popup items
+enum { MORE_RENAME, MORE_TRASH, MORE_EXPORT_SAV, MORE_EXPORT_DSV, MORE_NEW, MORE_IMPORT };
 #define IMPORT_ROWS 5
 
 // Choices for "Keep auto backups"; 0 keeps all.
@@ -630,11 +635,13 @@ static void run_op(App *app, UiOp op)
             break;
 
         case OP_EXPORT:
+        case OP_EXPORT_DSV:
             if (!g || !b)
                 break;
             {
                 char path[DSAVE_PATH_MAX], base[DSAVE_PATH_MAX];
-                DsaveResult r = backup_export(lib, g, b, path, sizeof(path));
+                DsaveResult r = backup_export(lib, g, b, op == OP_EXPORT_DSV ? EXPORT_DSV : EXPORT_SAV, path,
+                                              sizeof(path));
                 path_basename(base, sizeof(base), path);
                 snprintf(msg, sizeof(msg), "Exported to _DSavE/export/%s", base);
                 result_status(app, r, msg);
@@ -682,18 +689,21 @@ static void run_op(App *app, UiOp op)
             break;
 
         case OP_IMPORT:
-            if (!g || app->import_sel >= app->import_count)
+            if (app->import_sel >= app->import_count || app->import_game < 0 || app->import_game >= lib->count)
                 break;
             {
-                DsaveResult r = backup_import(lib, g, app->imports[app->import_sel].path, &made);
+                Game *into = &lib->games[app->import_game];
+                DsaveResult r = backup_import(lib, into, app->imports[app->import_sel].path, &made);
                 if (r == DSAVE_OK)
                 {
+                    // Show the game it went into, which may not be the one
+                    // that was selected.
+                    app->game_sel = app->import_game;
+                    keep_visible(app->game_sel, &app->game_scroll, GAME_ROWS, lib->count);
                     load_backups(app);
                     select_backup_named(app, made.name);
                     set_status(app, STATUS_OK, "Imported as %s", made.name);
                 }
-                else if (r == DSAVE_ERR_UNSUPPORTED)
-                    set_status(app, STATUS_ERROR, "no$gba saves aren't supported");
                 else
                     result_status(app, r, "");
             }
@@ -795,7 +805,7 @@ static void act_more(App *app)
     if (!cur_game(app))
         return;
     app->modal = MODAL_MORE;
-    app->more_sel = cur_backup(app) ? 0 : 3;
+    app->more_sel = cur_backup(app) ? MORE_RENAME : MORE_NEW;
     app->dirty = true;
 }
 
@@ -949,9 +959,9 @@ static void menu_activate(App *app, int item)
 static bool more_enabled(App *app, int item)
 {
     Game *g = cur_game(app);
-    if (item == 3)
+    if (item == MORE_NEW)
         return g && g->has_save;
-    if (item == 4)
+    if (item == MORE_IMPORT)
         return g && g->info.game_code[0]; // An empty card slot has no game to import for
     return cur_backup(app) != NULL;
 }
@@ -964,6 +974,16 @@ static void open_import(App *app)
     app->dirty = true;
 }
 
+// The game an import file goes into: the one whose ROM it is named after,
+// otherwise the selected game.
+static int import_target(const App *app, const ImportFile *f)
+{
+    if (f->game >= 0 && f->game < app->lib->count)
+        return f->game;
+    const Game *g = app->lib->count ? &app->lib->games[app->game_sel] : NULL;
+    return g && g->info.game_code[0] ? app->game_sel : -1;
+}
+
 static void import_choose(App *app)
 {
     if (app->import_sel >= app->import_count)
@@ -971,14 +991,20 @@ static void import_choose(App *app)
     const ImportFile *f = &app->imports[app->import_sel];
     if (!f->valid)
     {
-        set_status(app, STATUS_ERROR, f->size < 0 ? "DSavE can't read that file (no$gba saves aren't supported)"
-                                                  : "That file is not a DS save size");
+        set_status(app, STATUS_ERROR, f->size < 0 ? "That save file is damaged" : "That file is not a DS save size");
         return;
     }
-    Game *g = cur_game(app);
-    confirm(app, OP_IMPORT, false, "Import this save?",
-            "\"%s\" becomes a backup of %s. DSavE can't tell which game a .sav is from, so check it's this one.",
-            f->name, g ? g->title : "");
+    app->import_game = import_target(app, f);
+    if (app->import_game < 0)
+        return;
+    const Game *g = &app->lib->games[app->import_game];
+    if (f->game >= 0)
+        confirm(app, OP_IMPORT, false, "Import this save?",
+                "\"%s\" is named after the ROM of %s, so it becomes a backup of that game.", f->name, g->title);
+    else
+        confirm(app, OP_IMPORT, false, "Import this save?",
+                "\"%s\" becomes a backup of %s. No ROM has the same name, so check it's the right game.", f->name,
+                g->title);
 }
 
 static void more_activate(App *app, int item)
@@ -989,21 +1015,24 @@ static void more_activate(App *app, int item)
     char label[64];
     switch (item)
     {
-        case 0:
+        case MORE_RENAME:
             open_keyboard(app, OP_RENAME, b->name);
             break;
-        case 1:
+        case MORE_TRASH:
             backup_label(b, label, sizeof(label));
             confirm(app, OP_TRASH, true, "Move to trash?",
                     "\"%s\" moves to _DSavE/_TRASH_. Delete it there from a PC to free space.", label);
             break;
-        case 2:
+        case MORE_EXPORT_SAV:
             queue(app, OP_EXPORT, "Exporting the save");
             break;
-        case 3:
+        case MORE_EXPORT_DSV:
+            queue(app, OP_EXPORT_DSV, "Exporting the save");
+            break;
+        case MORE_NEW:
             open_keyboard(app, OP_BACKUP_NAMED, "");
             break;
-        case 4:
+        case MORE_IMPORT:
             open_import(app);
             break;
     }
@@ -1109,7 +1138,7 @@ static void layout_bottom(App *app, Ctls *ctls)
             return;
         case MODAL_MORE:
             add_ctl(ctls, 0, 0, SCREEN_W, SCREEN_H, ID_OUTSIDE);
-            add_ctl(ctls, 20, 22, 216, 154, ID_NONE); // The box itself
+            add_ctl(ctls, 20, MORE_BOX_Y, 216, MORE_BOX_H, ID_NONE); // The box itself
             for (int i = 0; i < MORE_ITEMS; i++)
                 add_ctl(ctls, 26, MORE_Y + i * MORE_PITCH, 204, MORE_PITCH - 2, ID_ITEM + i);
             return;
@@ -2224,7 +2253,7 @@ static void draw_menu(Canvas *c, const App *app, const Ctls *ctls)
 static void draw_more(Canvas *c, const App *app, const Ctls *ctls)
 {
     dim(c);
-    draw_box(c, 20, 22, 216, 154);
+    draw_box(c, 20, MORE_BOX_Y, 216, MORE_BOX_H);
     const Backup *b = cur_backup((App *)app);
     char label[64], title[80];
     if (b)
@@ -2234,10 +2263,18 @@ static void draw_more(Canvas *c, const App *app, const Ctls *ctls)
     }
     else
         snprintf(title, sizeof(title), "No backup selected");
-    gfx_text_fit(c, &font_bold, 30, 29, 196, title, C_TEXT);
+    gfx_text_fit(c, &font_bold, 30, MORE_BOX_Y + 7, 196, title, C_TEXT);
 
-    static const char *const items[MORE_ITEMS] = { "Rename backup", "Move backup to trash", "Export .sav for PC",
-                                                   "New backup with a name", "Import a .sav\xe2\x80\xa6" };
+    static const char *const items[MORE_ITEMS] = {
+        [MORE_RENAME] = "Rename backup",          [MORE_TRASH] = "Move backup to trash",
+        [MORE_EXPORT_SAV] = "Export .sav",        [MORE_EXPORT_DSV] = "Export .dsv",
+        [MORE_NEW] = "New backup with a name",    [MORE_IMPORT] = "Import a save\xe2\x80\xa6",
+    };
+    // Who reads each export format
+    static const char *const hints[MORE_ITEMS] = {
+        [MORE_EXPORT_SAV] = "melonDS, flashcarts",
+        [MORE_EXPORT_DSV] = "DeSmuME, DraStic",
+    };
     for (int i = 0; i < MORE_ITEMS; i++)
     {
         const Ctl *ctl = find_ctl(ctls, ID_ITEM + i);
@@ -2246,7 +2283,10 @@ static void draw_more(Canvas *c, const App *app, const Ctls *ctls)
         gfx_rrect(c, ctl->x, ctl->y, ctl->w, ctl->h, 6,
                   sel && en ? C_SELECT : pressed(app, ctl->id) && en ? C_PRESSED : C_PANEL2);
         gfx_text(c, &font_body, ctl->x + 8, ctl->y + (ctl->h - font_body.height) / 2, items[i],
-                 en ? (i == 1 ? C_ERR : C_TEXT) : C_FAINT);
+                 en ? (i == MORE_TRASH ? C_ERR : C_TEXT) : C_FAINT);
+        if (hints[i])
+            gfx_text_right(c, &font_small, ctl->x + ctl->w - 8, ctl->y + (ctl->h - font_small.height) / 2,
+                           hints[i], en ? C_MUTED : C_FAINT);
     }
 }
 
@@ -2260,9 +2300,10 @@ static void draw_import(Canvas *c, const App *app, const Ctls *ctls)
     if (!app->import_count)
     {
         draw_wrapped(c, &font_small, 10, 34, SCREEN_W - 20,
-                     "No saves to import. Copy .sav, .dsv (DeSmuME) or .sav.gz files into the "
-                     "_DSavE/import folder on the SD card, then open this again. Saves from "
-                     "Checkpoint or JKSM on a 3DS are plain .sav files and work too.",
+                     "No saves to import. Copy saves into the _DSavE/import folder on the SD card, "
+                     "then open this again. DSavE reads .sav (melonDS, Checkpoint, JKSM), .dsv "
+                     "(DeSmuME, DraStic), no$gba, Action Replay .duc and .sav.gz files. A save "
+                     "named after a ROM goes into that game.",
                      C_MUTED, 7);
     }
     for (int i = 0; i < IMPORT_ROWS && app->import_scroll + i < app->import_count; i++)
@@ -2275,11 +2316,15 @@ static void draw_import(Canvas *c, const App *app, const Ctls *ctls)
             gfx_rrect(c, 3, y + 1, SCREEN_W - 10, COPY_ROW_H - 2, 5, C_SELECT);
         else if (pressed(app, ID_ITEM + i))
             gfx_rrect(c, 3, y + 1, SCREEN_W - 10, COPY_ROW_H - 2, 5, C_PANEL2);
-        char right[24];
+        char right[40], size[16];
         if (f->valid)
-            fmt_size(f->size, right, sizeof(right));
+        {
+            fmt_size(f->size, size, sizeof(size));
+            const char *fmt = emusave_format_name(f->format);
+            snprintf(right, sizeof(right), "%s%s%s", fmt, fmt[0] ? " \xc2\xb7 " : "", size);
+        }
         else
-            snprintf(right, sizeof(right), "%s", f->size < 0 ? "unsupported" : "wrong size");
+            snprintf(right, sizeof(right), "%s", f->size < 0 ? "damaged" : "wrong size");
         int rw = gfx_text_width(&font_small, right);
         gfx_text_right(c, &font_small, SCREEN_W - 12, y + 6, right, f->valid ? C_MUTED : C_ERR);
         gfx_text_fit(c, &font_body, 10, y + 4, SCREEN_W - 12 - rw - 6 - 10, f->name, f->valid ? C_TEXT : C_FAINT);
@@ -2288,9 +2333,11 @@ static void draw_import(Canvas *c, const App *app, const Ctls *ctls)
                    app->import_count);
 
     gfx_fill(c, 0, BAR_Y - 3, SCREEN_W, SCREEN_H - BAR_Y + 3, C_PANEL);
-    const Game *g = app->lib->count ? &app->lib->games[app->game_sel] : NULL;
+    int target = app->import_count ? import_target(app, &app->imports[app->import_sel]) : app->game_sel;
+    const Game *g = target >= 0 && target < app->lib->count ? &app->lib->games[target] : NULL;
     char into[160];
-    snprintf(into, sizeof(into), "Into: %s", g ? g->title : "");
+    snprintf(into, sizeof(into), "Into: %s%s", g ? g->title : "",
+             app->import_count && app->imports[app->import_sel].game >= 0 ? " (named after its ROM)" : "");
     gfx_text_fit(c, &font_small, 8, BAR_Y + 4, SCREEN_W - 16, into, C_FAINT);
     bool can = app->import_count && app->imports[app->import_sel].valid;
     draw_button(c, app, find_ctl(ctls, ID_DLG_OK), "A", "Import", can);
