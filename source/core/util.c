@@ -76,9 +76,26 @@ void sanitize_name(char *out, size_t out_size, const char *in, size_t max_len)
     if (max_len >= out_size)
         max_len = out_size - 1;
 
+    // Accented Latin-1 letters (U+00C0-U+00FF) fold to their base letter,
+    // so "Pok\u00e9mon" becomes "Pokemon".
+    static const char latin1[] = "AAAAAAACEEEEIIIIDNOOOOOxOUUUUYTsaaaaaaaceeeeiiiidnooooo_ouuuuyty";
+
     for (const unsigned char *p = (const unsigned char *)in; *p && n < max_len; p++)
     {
         unsigned char c = *p;
+        if ((c == 0xC3) && (p[1] & 0xC0) == 0x80)
+        {
+            // Two-byte UTF-8 for U+00C0-U+00FF.
+            c = (unsigned char)latin1[(p[1] & 0x3F)];
+            p++;
+        }
+        else if (c >= 0xC0)
+        {
+            // Any other UTF-8 character becomes one '_'.
+            while ((p[1] & 0xC0) == 0x80)
+                p++;
+            c = '_';
+        }
         if (c < 0x20 || c > 0x7E || strchr(reserved, c))
             c = '_';
         // Collapse runs of spaces/underscores so titles stay readable.

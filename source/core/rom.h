@@ -8,7 +8,7 @@
 typedef struct {
     char header_title[13]; // 12-byte ASCII title at 0x000, NUL-terminated
     char game_code[5];     // 4-character game code at 0x00C, e.g. "ACTE"
-    char banner_title[64]; // English banner title (first line), ASCII-folded
+    char banner_title[128]; // English banner title (first line), UTF-8
 } RomInfo;
 
 // Fill info from the ROM at path. Returns false if the file is not readable

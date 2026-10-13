@@ -3,8 +3,9 @@
 //   <root>/_DSavE/saves/<GAMECODE> <title>/<backup name>/<title>.sav
 //                                                       /backup.ini
 //
-// The .sav is always a raw, exact-size image, so PC tools and emulators can
-// open it directly. backup.ini records its size and CRC-32, which restore
+// The .sav is a raw image of the save file, so PC tools and emulators can
+// open it directly. With compression on it is <title>.sav.gz instead, a
+// standard gzip file. backup.ini records its size and CRC-32, which restore
 // checks before it touches the live save.
 
 #ifndef DSAVE_BACKUP_H
@@ -45,6 +46,7 @@ typedef struct {
     uint32_t crc32;
     bool has_meta;                // backup.ini was present and readable
     bool is_auto;                 // Made automatically before a restore
+    bool compressed;              // Stored as <title>.sav.gz
 } Backup;
 
 // Paths under <root>/_DSavE.
@@ -94,6 +96,11 @@ DsaveResult backup_restore_path(const Library *lib, Game *game, const Backup *b,
 //   - backup larger: the save's size if the extra is all 0xFF, else the
 //     backup's size. Data is never cut off.
 long backup_restore_length(const char *backup_file, long backup_size, long live_size);
+
+// Compress a backup to .sav.gz, or decompress it back to a raw .sav. The new
+// file is written and verified before the old one is removed. Saves larger
+// than SAVEFILE_GZ_MAX are left raw (DSAVE_ERR_UNSUPPORTED).
+DsaveResult backup_set_compressed(const Backup *b, bool compress, Backup *out);
 
 // Rename a backup's folder.
 DsaveResult backup_rename(const Library *lib, const Game *game, const Backup *b,
