@@ -6,6 +6,9 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "ini.h"
+#include "savefile.h"
+
 #define APP_DIR    "_DSavE"
 #define SAVES_DIR  "_DSavE/saves"
 #define TRASH_DIR  "_DSavE/_TRASH_"
@@ -32,6 +35,7 @@ const char *dsave_result_str(DsaveResult r)
         case DSAVE_ERR_WRONG_GAME:    return "Backup is for another game";
         case DSAVE_ERR_EXISTS:        return "That name is already used";
         case DSAVE_ERR_ROLLED_BACK:   return "Restore failed; old save kept";
+        case DSAVE_ERR_UNSUPPORTED:   return "Not supported by this kernel";
     }
     return "Unknown error";
 }
@@ -168,17 +172,26 @@ DsaveResult backup_create_from(const Library *lib, const Game *game, const char 
     if (!mkdir_p(tmp_dir))
         return DSAVE_ERR_IO;
 
-    char sav_name[TITLE_MAX + 8], tmp_file[DSAVE_PATH_MAX];
+    uint32_t src_crc, dst_crc;
+    long src_size, dst_size;
+    if (!savefile_crc32(src, &src_crc, &src_size))
+        return DSAVE_ERR_IO;
+
+    // Compress when the setting is on and the save fits in memory.
+    bool compress = lib->compress && src_size <= SAVEFILE_GZ_MAX;
+    char sav_name[TITLE_MAX + 16], tmp_file[DSAVE_PATH_MAX];
     save_file_name(game, sav_name, sizeof(sav_name));
+    if (compress)
+        strcat(sav_name, SAVEFILE_GZ_EXT);
     if (!path_join(tmp_file, sizeof(tmp_file), tmp_dir, sav_name))
         return DSAVE_ERR_PATH;
 
-    uint32_t src_crc, dst_crc;
-    long src_size, dst_size;
     DsaveResult r = DSAVE_OK;
-    if (!file_crc32(src, &src_crc, &src_size) || !copy_file(src, tmp_file))
+    bool written = compress ? savefile_write_gz(src, tmp_file, NULL, NULL)
+                            : savefile_copy_raw(src, tmp_file);
+    if (!written)
         r = DSAVE_ERR_IO;
-    else if (!file_crc32(tmp_file, &dst_crc, &dst_size) ||
+    else if (!savefile_crc32(tmp_file, &dst_crc, &dst_size) ||
              dst_crc != src_crc || dst_size != src_size)
         r = DSAVE_ERR_VERIFY;
     else if (!write_meta(tmp_dir, game, src, created, src_size, src_crc))
@@ -208,6 +221,7 @@ DsaveResult backup_create_from(const Library *lib, const Game *game, const char 
         out->crc32 = src_crc;
         out->has_meta = true;
         out->is_auto = strncmp(out->name, AUTO_PREFIX, strlen(AUTO_PREFIX)) == 0;
+        out->compressed = compress;
     }
     return DSAVE_OK;
 }
@@ -215,7 +229,7 @@ DsaveResult backup_create_from(const Library *lib, const Game *game, const char 
 // ---------------------------------------------------------------------------
 // List
 
-// The .sav inside a backup folder: the first *.sav file found.
+// The save inside a backup folder: the first *.sav or *.sav.gz found.
 static bool find_sav(const char *dir, char *out, size_t size)
 {
     DIR *d = opendir(dir);
@@ -225,7 +239,7 @@ static bool find_sav(const char *dir, char *out, size_t size)
     struct dirent *e;
     while (!found && (e = readdir(d)) != NULL)
     {
-        if (e->d_name[0] != '.' && has_ext(e->d_name, ".sav"))
+        if (e->d_name[0] != '.' && (has_ext(e->d_name, ".sav") || has_ext(e->d_name, ".sav.gz")))
             found = path_join(out, size, dir, e->d_name);
     }
     closedir(d);
@@ -267,10 +281,11 @@ int backup_list(const Library *lib, const Game *game, Backup *out, int max)
         if (!b->has_meta)
         {
             // Hand-copied backup: fall back to what the file itself says.
-            b->size = file_size(b->file);
+            b->size = savefile_size(b->file);
             snprintf(b->created, sizeof(b->created), "%s", b->name);
         }
         b->is_auto = strncmp(b->name, AUTO_PREFIX, strlen(AUTO_PREFIX)) == 0;
+        b->compressed = savefile_is_gz(b->file);
         n++;
     }
     closedir(d);
@@ -286,8 +301,8 @@ DsaveResult backup_validate(const Backup *b)
 {
     uint32_t crc;
     long size;
-    if (!file_crc32(b->file, &crc, &size))
-        return DSAVE_ERR_IO;
+    if (!savefile_crc32(b->file, &crc, &size))
+        return b->compressed || savefile_is_gz(b->file) ? DSAVE_ERR_CORRUPT : DSAVE_ERR_IO;
     if (!is_valid_save_size(size))
         return DSAVE_ERR_BAD_SIZE;
     if (b->has_meta && (size != b->size || crc != b->crc32))
@@ -295,28 +310,7 @@ DsaveResult backup_validate(const Backup *b)
     return DSAVE_OK;
 }
 
-// True if every byte of path from offset onwards is 0xFF (erased flash, or
-// a kernel's padding).
-static bool tail_is_ff(const char *path, long offset)
-{
-    FILE *f = fopen(path, "rb");
-    if (!f)
-        return false;
-    bool ff = fseek(f, offset, SEEK_SET) == 0;
-    uint8_t buf[IO_CHUNK];
-    size_t n;
-    while (ff && (n = fread(buf, 1, sizeof(buf), f)) > 0)
-    {
-        for (size_t i = 0; i < n && ff; i++)
-            ff = buf[i] == 0xFF;
-    }
-    if (ferror(f))
-        ff = false;
-    fclose(f);
-    return ff;
-}
-
-// Write len bytes to dst: src's data (up to src_len bytes), then 0xFF
+// Write len bytes to dst: src's save data (raw or .gz) (up to src_len bytes), then 0xFF
 // padding. An existing dst is overwritten in place, never truncated or
 // recreated, so a flashcart's pre-allocated, contiguous file keeps its
 // clusters (Wood R4 refuses fragmented saves). crc_out receives the CRC-32
@@ -324,13 +318,13 @@ static bool tail_is_ff(const char *path, long offset)
 static bool write_save_stream(const char *src, long src_len, const char *dst, long len,
                               uint32_t *crc_out)
 {
-    FILE *in = fopen(src, "rb");
-    if (!in)
+    SaveReader in;
+    if (!savefile_open(&in, src))
         return false;
     FILE *out = fopen(dst, file_exists(dst) ? "r+b" : "wb");
     if (!out)
     {
-        fclose(in);
+        savefile_close(&in);
         return false;
     }
 
@@ -345,7 +339,7 @@ static bool write_save_stream(const char *src, long src_len, const char *dst, lo
         if (done < src_len)
         {
             size_t from_src = (size_t)(src_len - done) < want ? (size_t)(src_len - done) : want;
-            got = fread(buf, 1, from_src, in);
+            got = savefile_read(&in, buf, from_src);
             if (got != from_src)
                 ok = false;
         }
@@ -355,7 +349,7 @@ static bool write_save_stream(const char *src, long src_len, const char *dst, lo
         crc = crc32_update(crc, buf, want);
         done += (long)want;
     }
-    fclose(in);
+    savefile_close(&in);
     if (fclose(out) != 0)
         ok = false;
     if (crc_out)
@@ -378,11 +372,28 @@ long backup_restore_length(const char *backup_file, long backup_size, long live_
         return live_size;        // Keep the kernel's size; pad with 0xFF
     // Backup is bigger (e.g. a 512 KB padded file going onto an exact-size
     // save). Drop the extra only if it is padding; never lose data.
-    return tail_is_ff(backup_file, live_size) ? live_size : backup_size;
+    return savefile_tail_is_ff(backup_file, live_size) ? live_size : backup_size;
 }
 
 DsaveResult backup_restore_to(const Library *lib, Game *game, const Backup *b, int loc,
                               Backup *auto_backup)
+{
+    library_refresh_game(lib, game);
+    if (loc < 0)
+        loc = game->primary;
+    if (loc >= game->loc_count)
+    {
+        if (auto_backup)
+            memset(auto_backup, 0, sizeof(*auto_backup));
+        return DSAVE_ERR_PATH;
+    }
+    char path[DSAVE_PATH_MAX];
+    snprintf(path, sizeof(path), "%s", game->locs[loc].path);
+    return backup_restore_path(lib, game, b, path, auto_backup);
+}
+
+DsaveResult backup_restore_path(const Library *lib, Game *game, const Backup *b,
+                                const char *path, Backup *auto_backup)
 {
     if (auto_backup)
         memset(auto_backup, 0, sizeof(*auto_backup));
@@ -393,14 +404,13 @@ DsaveResult backup_restore_to(const Library *lib, Game *game, const Backup *b, i
     if (b->game_code[0] && strcmp(b->game_code, game->info.game_code) != 0)
         return DSAVE_ERR_WRONG_GAME;
 
-    library_refresh_game(lib, game);
-    if (loc < 0)
-        loc = game->primary;
-    if (loc >= game->loc_count)
-        return DSAVE_ERR_PATH;
-    const SaveLoc target = game->locs[loc];
+    struct {
+        const char *path;
+        bool exists;
+        long size;
+    } target = { path, file_exists(path), file_size(path) };
 
-    long backup_size = file_size(b->file);
+    long backup_size = savefile_size(b->file);
     long len = backup_restore_length(b->file, backup_size, target.exists ? target.size : -1);
     uint32_t crc;
 
@@ -448,6 +458,59 @@ DsaveResult backup_restore(const Library *lib, Game *game, const Backup *b,
 
 // ---------------------------------------------------------------------------
 // Rename, trash, export
+
+DsaveResult backup_set_compressed(const Backup *b, bool compress, Backup *out)
+{
+    if (out)
+        *out = *b;
+    bool is_gz = savefile_is_gz(b->file);
+    if (is_gz == compress)
+        return DSAVE_OK;
+
+    DsaveResult r = backup_validate(b);
+    if (r != DSAVE_OK)
+        return r;
+    uint32_t crc, new_crc;
+    long size, new_size;
+    if (!savefile_crc32(b->file, &crc, &size))
+        return DSAVE_ERR_IO;
+    if (compress && size > SAVEFILE_GZ_MAX)
+        return DSAVE_ERR_UNSUPPORTED;
+
+    // "<title>.sav" <-> "<title>.sav.gz", next to the old file.
+    char target[DSAVE_PATH_MAX];
+    snprintf(target, sizeof(target), "%s", b->file);
+    if (compress)
+    {
+        if (strlen(target) + strlen(SAVEFILE_GZ_EXT) >= sizeof(target))
+            return DSAVE_ERR_PATH;
+        strcat(target, SAVEFILE_GZ_EXT);
+    }
+    else
+        target[strlen(target) - strlen(SAVEFILE_GZ_EXT)] = '\0';
+
+    bool ok = compress ? savefile_write_gz(b->file, target, NULL, NULL)
+                       : savefile_copy_raw(b->file, target);
+    if (!ok)
+    {
+        remove(target);
+        return DSAVE_ERR_IO;
+    }
+    if (!savefile_crc32(target, &new_crc, &new_size) || new_crc != crc || new_size != size)
+    {
+        remove(target);
+        return DSAVE_ERR_VERIFY;
+    }
+    if (remove(b->file) != 0)
+        return DSAVE_ERR_IO;
+
+    if (out)
+    {
+        snprintf(out->file, sizeof(out->file), "%s", target);
+        out->compressed = compress;
+    }
+    return DSAVE_OK;
+}
 
 DsaveResult backup_rename(const Library *lib, const Game *game, const Backup *b,
                           const char *new_name)
@@ -498,9 +561,9 @@ DsaveResult backup_export(const Library *lib, const Game *game, const Backup *b,
 
     // Export the real chip image when the chip size is known and the rest of
     // the file is only a kernel's 0xFF padding.
-    long size = file_size(b->file);
+    long size = savefile_size(b->file);
     long len = size;
-    if (game->chip_size > 0 && size > game->chip_size && tail_is_ff(b->file, game->chip_size))
+    if (game->chip_size > 0 && size > game->chip_size && savefile_tail_is_ff(b->file, game->chip_size))
         len = game->chip_size;
 
     uint32_t crc;

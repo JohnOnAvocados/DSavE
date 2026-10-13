@@ -26,7 +26,7 @@ typedef struct {
 typedef struct {
     char rom_path[DSAVE_PATH_MAX];
     RomInfo info;
-    char title[64];   // Display title
+    char title[128];  // Display title, UTF-8
     long chip_size;   // Real chip size from Pico's save list, -1 unknown
 
     SaveLoc locs[GAME_MAX_LOCS];
@@ -51,6 +51,7 @@ typedef struct {
     Game games[LIBRARY_MAX_GAMES];
     int count;
     bool truncated;            // More ROMs than LIBRARY_MAX_GAMES
+    bool compress;             // Store new backups as .sav.gz
 } Library;
 
 // Detect kernels, then scan root for .nds/.dsi files (skipping system
@@ -68,6 +69,10 @@ void library_refresh_game(const Library *lib, Game *game);
 
 // Change the active kernel and refresh every game.
 void library_set_kernel(Library *lib, KernelId id);
+
+// Turn compression of new backups on or off; remembered in
+// _DSavE/settings.ini.
+bool library_set_compress(Library *lib, bool on);
 
 // Find the location entry used by a kernel, or -1.
 int library_loc_for_kernel(const Game *game, KernelId id);

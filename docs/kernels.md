@@ -73,12 +73,39 @@ not yet detect those.
 A DSpico usually carries Pico Launcher and TWiLight together, and an Ace3DS X
 might carry YSMenu, akmenu-next and TWiLight. For each game, DSavE lists every
 installed kernel's save path. Kernels that share a path share one entry. The
-**active kernel** (L/R on the game list, remembered in
+**active kernel** (chosen in the menu, START, and remembered in
 `_DSavE/settings.ini`) decides which save DSavE works on:
 
 1. the active kernel's save, if it exists;
 2. otherwise the most recently modified save of any kernel, flagged on screen;
 3. otherwise the active kernel's path, where a restore will create the file.
+
+## Comparing and copying between kernels
+
+The **Copies** screen (SELECT on the game list) lists every kernel's copy of
+the selected game's save:
+
+- ★ is the current save (see above), ✓ matches it, ≠ differs, and – means
+  there is no file yet. The top screen shows the selected copy's path, size,
+  CRC and whether it is the most recently played one.
+- Copies are compared by their data with trailing `0xFF` padding ignored. A
+  64 KB exact save and the same data padded to 512 KB count as the same.
+- The newest copy is marked. Remember that TWiLight moves saves out of
+  `saves/` when it launches through a flashcart kernel.
+- **A** copies the current save to the selected kernel's location. **START**
+  copies it to every location, creating missing files, so the game finds the
+  same save whichever kernel launches it. Every file that gets overwritten is
+  first backed up as `auto_<timestamp>`.
+- **Y** backs up the selected copy instead of the current save, so you can
+  keep a copy before overwriting it with another kernel's.
+
+### TWiLight save slots
+
+When TWiLight is installed and does not keep saves beside the ROM, the
+Copies screen also lists slots 0–9 (`.sav`, `.sav1`…`.sav9`). **A** on a
+slot writes `SAVE_NUMBER` to the game's
+`_nds/TWiLightMenu/gamesettings/<rom>.ini`, which is exactly what TWiLight's
+own per-game settings menu does. DSavE then works on that slot's file.
 
 ## Restoring onto padded saves
 
@@ -108,5 +135,9 @@ akmenu-next on an Ace3DS X):
    accepts the created file.
 5. For TWiLight: set a save number in the game's settings and check that DSavE
    follows it.
-6. Note anything that differs and report it so the profile can be fixed and
+6. Try the touch screen: tap a game, drag the list, tap the action buttons,
+   and rename a backup with the keyboard.
+7. Turn on *Compress new backups*, make a backup, restore it, and check the
+   game loads. Copy the `.sav.gz` to a PC and check `gunzip` opens it.
+8. Note anything that differs and report it so the profile can be fixed and
    marked as tested.

@@ -13,6 +13,8 @@
 #include "../source/core/kernel.h"
 #include "../source/core/library.h"
 #include "../source/core/rom.h"
+#include "../source/core/savefile.h"
+#include "../source/core/sync.h"
 #include "../source/core/util.h"
 
 static int failures = 0;
@@ -214,6 +216,8 @@ static void test_util(void)
     char out[64];
     sanitize_name(out, sizeof(out), "  Pok\xe9mon: Soul/Silver?  ", 40);
     CHECK(strcmp(out, "Pok_mon_ Soul_Silver_") == 0);
+    sanitize_name(out, sizeof(out), "Pok\xc3\xa9mon \xc3\x9c \xe3\x81\x82!", 40);
+    CHECK(strcmp(out, "Pokemon U _!") == 0);
     sanitize_name(out, sizeof(out), "...", 40);
     CHECK(strcmp(out, "unnamed") == 0);
     sanitize_name(out, sizeof(out), "abcdefghij", 4);
@@ -428,6 +432,16 @@ static void test_scan(void)
     Game *pk = find_game("IPGE");
     CHECK(pk && !pk->has_save && pk->save_size == -1);
     CHECK(pk && path_is(pk->save_path, "roms/Pokemon_SoulSilver.sav"));
+
+    // Banner titles keep accents as UTF-8; backup folders fold them.
+    new_card();
+    make_dir("__rpg");
+    make_rom("hg.nds", "POKEMON HG", "IPKE", "POK\xe9MON HeartGold\nNintendo");
+    library_scan(&lib, root);
+    CHECK(lib.count == 1 && strcmp(lib.games[0].title, "POK\xc3\xa9MON HeartGold") == 0);
+    char dir[DSAVE_PATH_MAX];
+    CHECK(lib.count == 1 && backup_game_dir(&lib, &lib.games[0], dir, sizeof(dir)) &&
+          path_is(dir, "_DSavE/saves/IPKE POKeMON HeartGold"));
 }
 
 static void test_multi_kernel_card(void)
@@ -749,6 +763,253 @@ static void test_blank_and_first_save(void)
     CHECK(crc_of(pk->save_path) == crc_of(src));
 }
 
+static void test_sync_check(void)
+{
+    // DSpico card: Pico keeps a 512 KB padded save beside the ROM; TWiLight
+    // has an exact 32 KB copy of the same data in saves/.
+    new_card();
+    make_dir("_pico");
+    make_dir("_nds/TWiLightMenu");
+    make_rom("Game.nds", "GAME", "ABCE", NULL);
+    make_save("Game.sav", 512 * KB, 32 * KB, 21);
+    make_save("saves/Game.sav", 32 * KB, 32 * KB, 21);
+    set_mtime("Game.sav", 1000000000);
+    set_mtime("saves/Game.sav", 1100000000);
+    library_scan(&lib, root);
+    Game *g = find_game("ABCE");
+    CHECK(g && g->loc_count == 2);
+    if (!g)
+        return;
+    int pico = library_loc_for_kernel(g, KERNEL_PICO);
+    int twl = library_loc_for_kernel(g, KERNEL_TWILIGHT);
+
+    SyncInfo si;
+    sync_check(g, &si);
+    CHECK(si.state == SYNC_MATCH && si.existing == 2);
+    CHECK(si.newest == twl && si.loc[twl].newest && !si.loc[pico].newest);
+    CHECK(si.loc[pico].data_size == 32 * KB && si.loc[twl].data_size == 32 * KB);
+
+    // Change TWiLight's copy: now they differ.
+    make_save("saves/Game.sav", 32 * KB, 32 * KB, 22);
+    library_refresh_game(&lib, g);
+    sync_check(g, &si);
+    CHECK(si.state == SYNC_DIFFERENT);
+    CHECK(si.loc[pico].same_as_primary && !si.loc[twl].same_as_primary);
+
+    // Only one copy: nothing to compare.
+    char path[DSAVE_PATH_MAX];
+    p(path, "saves/Game.sav");
+    remove(path);
+    library_refresh_game(&lib, g);
+    sync_check(g, &si);
+    CHECK(si.state == SYNC_SINGLE && si.existing == 1);
+}
+
+static void test_sync_padding_edge(void)
+{
+    // 0xFF bytes inside the data, including across a 4 KB chunk boundary,
+    // are data, not padding.
+    new_card();
+    make_dir("_pico");
+    make_dir("_nds/TWiLightMenu");
+    make_rom("Game.nds", "GAME", "ABCE", NULL);
+    char a[DSAVE_PATH_MAX], b[DSAVE_PATH_MAX];
+    p(a, "Game.sav");
+    p(b, "saves/Game.sav");
+    make_dir("saves");
+    FILE *fa = fopen(a, "wb"), *fb = fopen(b, "wb");
+    for (long i = 0; i < 64 * KB; i++)
+    {
+        uint8_t v = (i >= 4000 && i < 9000) ? 0xFF : (uint8_t)(i & 0x7F);
+        if (i >= 16 * KB)
+            v = 0xFF;
+        fputc(v, fa);
+        if (i < 16 * KB)
+            fputc(v, fb);
+    }
+    fclose(fa);
+    fclose(fb);
+    library_scan(&lib, root);
+    Game *g = find_game("ABCE");
+    SyncInfo si;
+    sync_check(g, &si);
+    // The 0xFF run at 4000-8999 sits inside the data; only the tail from
+    // 16 KB on is padding.
+    CHECK(si.loc[library_loc_for_kernel(g, KERNEL_PICO)].data_size == 16 * KB);
+    CHECK(si.state == SYNC_MATCH);
+}
+
+static void test_sync_copy_and_all(void)
+{
+    new_card();
+    make_dir("_pico");
+    make_dir("_nds/TWiLightMenu");
+    make_text("_nds/akmenunext/globalsettings.ini", "[system]\nsavedir = 1\nsaveext = .nds.sav\n");
+    make_rom("Game.nds", "GAME", "ABCE", NULL);
+    make_save("Game.sav", 512 * KB, 32 * KB, 31);
+    make_save("saves/Game.sav", 512 * KB, 32 * KB, 32);
+    library_scan(&lib, root);
+    Game *g = find_game("ABCE");
+    CHECK(g && g->loc_count == 3);
+    if (!g)
+        return;
+    int pico = library_loc_for_kernel(g, KERNEL_PICO);
+    int twl = library_loc_for_kernel(g, KERNEL_TWILIGHT);
+    int ak = library_loc_for_kernel(g, KERNEL_AKMENUNEXT);
+    CHECK(path_is(g->locs[ak].path, "saves/Game.nds.sav"));
+
+    // Copy TWiLight's save over Pico's; Pico's old save is kept as auto_.
+    uint32_t old_pico = crc_of_rel("Game.sav");
+    Backup safety;
+    CHECK(sync_copy(&lib, g, twl, pico, &safety) == DSAVE_OK);
+    CHECK(crc_of_rel("Game.sav") == crc_of_rel("saves/Game.sav"));
+    CHECK(safety.is_auto && crc_of(safety.file) == old_pico);
+    CHECK(sync_copy(&lib, g, ak, pico, NULL) == DSAVE_ERR_NO_SAVE);
+
+    // Sync all: the primary (Pico) goes everywhere, including akmenu-next's
+    // missing file.
+    make_save("Game.sav", 512 * KB, 40 * KB, 33);
+    library_refresh_game(&lib, g);
+    int copied = 0;
+    CHECK(sync_all(&lib, g, &copied) == DSAVE_OK && copied == 2);
+    CHECK(g->locs[ak].exists);
+    SyncInfo si;
+    sync_check(g, &si);
+    CHECK(si.state == SYNC_MATCH && si.existing == 3);
+}
+
+static void test_slots(void)
+{
+    new_card();
+    make_dir("_nds/TWiLightMenu");
+    make_dir("_pico");
+    make_rom("roms/Game.nds", "GAME", "ABCE", NULL);
+    make_save("roms/saves/Game.sav", 64 * KB, 64 * KB, 41);
+    make_save("roms/saves/Game.sav2", 64 * KB, 64 * KB, 42);
+    library_scan(&lib, root);
+    library_set_kernel(&lib, KERNEL_TWILIGHT);
+    Game *g = find_game("ABCE");
+    CHECK(g != NULL);
+    if (!g)
+        return;
+
+    SaveSlot slots[SLOT_MAX];
+    int n = slots_list(&lib, g, KERNEL_TWILIGHT, slots, SLOT_MAX);
+    CHECK(n == 10);
+    CHECK(slots[0].exists && slots[0].current);
+    CHECK(!slots[1].exists && slots[2].exists && !slots[2].current);
+    CHECK(path_is(slots[2].path, "roms/saves/Game.sav2"));
+    CHECK(slots_list(&lib, g, KERNEL_PICO, slots, SLOT_MAX) == 1);
+    CHECK(slots_list(&lib, g, KERNEL_WOOD, slots, SLOT_MAX) == 0);
+
+    // Switch TWiLight to slot 2: the per-game ini is written and the
+    // primary save follows.
+    CHECK(slots_set_current(&lib, g, KERNEL_TWILIGHT, 2) == DSAVE_OK);
+    CHECK(path_is(g->save_path, "roms/saves/Game.sav2"));
+    char ini[DSAVE_PATH_MAX];
+    p(ini, "_nds/TWiLightMenu/gamesettings/Game.nds.ini");
+    CHECK(ini_get_int(ini, "GAMESETTINGS", "SAVE_NUMBER", -1) == 2);
+    n = slots_list(&lib, g, KERNEL_TWILIGHT, slots, SLOT_MAX);
+    CHECK(slots[2].current && !slots[0].current);
+    CHECK(slots_set_current(&lib, g, KERNEL_PICO, 1) == DSAVE_ERR_UNSUPPORTED);
+    CHECK(slots_set_current(&lib, g, KERNEL_TWILIGHT, 10) == DSAVE_ERR_PATH);
+
+    // Restore a backup into an empty slot file.
+    Backup b;
+    CHECK(backup_create(&lib, g, "slot2", false, &b) == DSAVE_OK);
+    CHECK(backup_restore_path(&lib, g, &b, slots[5].path, NULL) == DSAVE_OK);
+    CHECK(crc_of(slots[5].path) == crc_of_rel("roms/saves/Game.sav2"));
+}
+
+static void test_compression(void)
+{
+    new_card();
+    make_dir("_pico");
+    make_rom("Game.nds", "GAME", "ABCE", NULL);
+    make_save("Game.sav", 512 * KB, 48 * KB, 51);
+    library_scan(&lib, root);
+    CHECK(!lib.compress);
+    CHECK(library_set_compress(&lib, true));
+    library_scan(&lib, root);
+    CHECK(lib.compress); // Remembered in settings.ini
+    Game *g = find_game("ABCE");
+    if (!g)
+        return;
+    uint32_t live = crc_of(g->save_path);
+
+    Backup b;
+    CHECK(backup_create(&lib, g, "packed", false, &b) == DSAVE_OK);
+    CHECK(b.compressed && has_ext(b.file, ".sav.gz"));
+    CHECK(file_size(b.file) < 64 * KB); // 512 KB of mostly padding
+    CHECK(b.size == 512 * KB && b.crc32 == live);
+    CHECK(backup_validate(&b) == DSAVE_OK);
+
+    // It is a standard gzip file.
+    char cmd[DSAVE_PATH_MAX * 2 + 64], out[DSAVE_PATH_MAX];
+    p(out, "gunzipped.sav");
+    snprintf(cmd, sizeof(cmd), "gzip -dc '%s' > '%s'", b.file, out);
+    CHECK(system(cmd) == 0);
+    CHECK(crc_of(out) == live);
+
+    // Listed, restored and exported like a raw backup.
+    Backup list[BACKUP_LIST_MAX];
+    CHECK(backup_list(&lib, g, list, BACKUP_LIST_MAX) == 1 && list[0].compressed);
+    make_save("Game.sav", 512 * KB, 48 * KB, 52);
+    library_refresh_game(&lib, g);
+    Backup safety;
+    CHECK(backup_restore(&lib, g, &list[0], &safety) == DSAVE_OK);
+    CHECK(crc_of(g->save_path) == live && safety.compressed);
+    char exported[DSAVE_PATH_MAX];
+    CHECK(backup_export(&lib, g, &list[0], exported, sizeof(exported)) == DSAVE_OK);
+    CHECK(has_ext(exported, ".sav") && crc_of(exported) == live);
+
+    // Decompress and compress again in place.
+    Backup raw, packed;
+    CHECK(backup_set_compressed(&list[0], false, &raw) == DSAVE_OK);
+    CHECK(!raw.compressed && has_ext(raw.file, ".sav") && !file_exists(list[0].file));
+    CHECK(crc_of(raw.file) == live);
+    CHECK(backup_set_compressed(&raw, true, &packed) == DSAVE_OK);
+    CHECK(packed.compressed && !file_exists(raw.file) && backup_validate(&packed) == DSAVE_OK);
+
+    // A corrupt .gz is refused and the live save is left alone.
+    FILE *f = fopen(packed.file, "r+b");
+    fseek(f, 20, SEEK_SET);
+    fputc(0x00, f);
+    fputc(0x11, f);
+    fclose(f);
+    CHECK(backup_validate(&packed) == DSAVE_ERR_CORRUPT);
+    CHECK(backup_restore(&lib, g, &packed, NULL) == DSAVE_ERR_CORRUPT);
+    CHECK(crc_of(g->save_path) == live);
+
+    // A .sav.gz made by gzip on a PC (with a file name in the header) works.
+    char game_dir[DSAVE_PATH_MAX], bdir[DSAVE_PATH_MAX], src[DSAVE_PATH_MAX];
+    backup_game_dir(&lib, g, game_dir, sizeof(game_dir));
+    path_join(bdir, sizeof(bdir), game_dir, "from pc");
+    mkdir_p(bdir);
+    make_save("pc.sav", 64 * KB, 64 * KB, 53);
+    p(src, "pc.sav");
+    snprintf(cmd, sizeof(cmd), "cd '%s' && gzip -k pc.sav && mv pc.sav.gz '%s/'", root, bdir);
+    CHECK(system(cmd) == 0);
+    int n = backup_list(&lib, g, list, BACKUP_LIST_MAX);
+    bool ok = false;
+    for (int i = 0; i < n; i++)
+    {
+        if (strcmp(list[i].name, "from pc") == 0)
+            ok = list[i].compressed && list[i].size == 64 * KB &&
+                 backup_restore(&lib, g, &list[i], NULL) == DSAVE_OK;
+    }
+    CHECK(ok);
+    CHECK(crc_prefix(g->save_path, 64 * KB) == crc_of(src));
+    CHECK(savefile_tail_is_ff(g->save_path, 64 * KB));
+
+    // Saves over 1 MB stay raw.
+    make_save("Game.sav", 2 * KB * KB, 2 * KB * KB, 54);
+    library_refresh_game(&lib, g);
+    CHECK(backup_create(&lib, g, "big", false, &b) == DSAVE_OK);
+    CHECK(!b.compressed);
+    CHECK(backup_set_compressed(&b, true, NULL) == DSAVE_ERR_UNSUPPORTED);
+}
+
 int main(void)
 {
     char tmpl[] = "/tmp/dsave-test-XXXXXX";
@@ -769,6 +1030,11 @@ int main(void)
     test_export_trim();
     test_restore_to_other_kernel();
     test_blank_and_first_save();
+    test_sync_check();
+    test_sync_padding_edge();
+    test_sync_copy_and_all();
+    test_slots();
+    test_compression();
 
     library_free(&lib);
     remove_tree(tmpl);

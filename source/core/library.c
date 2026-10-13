@@ -1,5 +1,7 @@
 #include "library.h"
 
+#include "ini.h"
+
 #include <dirent.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -171,6 +173,9 @@ int library_scan(Library *lib, const char *root)
     lib->count = 0;
     lib->truncated = false;
     kernels_detect(&lib->kernels, root);
+    char settings[DSAVE_PATH_MAX];
+    kernels_settings_path(root, settings, sizeof(settings));
+    lib->compress = ini_get_int(settings, "dsave", "compress", 0) != 0;
 
     scan_dir(lib, root, 0);
     qsort(lib->games, (size_t)lib->count, sizeof(Game), compare_games);
@@ -188,4 +193,13 @@ void library_set_kernel(Library *lib, KernelId id)
         return;
     for (int i = 0; i < lib->count; i++)
         library_refresh_game(lib, &lib->games[i]);
+}
+
+bool library_set_compress(Library *lib, bool on)
+{
+    char settings[DSAVE_PATH_MAX], dir[DSAVE_PATH_MAX];
+    kernels_settings_path(lib->root, settings, sizeof(settings));
+    path_dirname(dir, sizeof(dir), settings);
+    lib->compress = on;
+    return mkdir_p(dir) && ini_set_int(settings, "dsave", "compress", on ? 1 : 0);
 }

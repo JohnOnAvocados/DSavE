@@ -4,10 +4,16 @@ A save manager for the Nintendo DS family that runs on the console itself, in
 the spirit of Checkpoint and JKSM. Back up, restore, name and export your game
 saves without a PC.
 
-> **Status: early.** This is the save engine with a simple text front end.
-> The dual-screen UI, compression and physical-cartridge saves are still to
-> come (see [Roadmap](#roadmap)). It has not been tested on hardware yet, so
-> keep your own copy of anything precious.
+<p>
+<img src="docs/images/main.png" alt="Game list and backup history" width="200">
+<img src="docs/images/restore.png" alt="Hold A to restore" width="200">
+<img src="docs/images/copies.png" alt="Copies of a save across kernels" width="200">
+<img src="docs/images/rename.png" alt="Touch keyboard" width="200">
+</p>
+
+> **Status: early.** It has not been tested on hardware yet, so keep your own
+> copy of anything precious. Physical-cartridge saves are still to come (see
+> [Roadmap](#roadmap)).
 
 ## What it does
 
@@ -24,8 +30,8 @@ saves without a PC.
   | YSMenu | `TTMenu/` | `<rom>.sav` beside the ROM |
   | AKAIO | `__aio/` | `<rom>.sav` beside the ROM |
 
-  When several kernels share a card, press L/R to pick the one you launch
-  games with. See [docs/kernels.md](docs/kernels.md) for every rule and its
+  When several kernels share a card, pick the one you launch games with in
+  the menu (START). See [docs/kernels.md](docs/kernels.md) for every rule and its
   source.
 
 - **Keeps as many backups as you like**, each with a name (a timestamp by
@@ -54,24 +60,38 @@ saves without a PC.
   verified, and only then renamed into place. A blank (all `00`/`FF`) save is
   flagged rather than silently kept.
 
+- **Compresses backups if you want.** Turn on *Compress new backups* in the
+  menu, or press X on any backup to compress or decompress it. Compressed
+  backups are standard gzip files (`<title>.sav.gz`), so `gunzip` or 7-Zip on
+  a PC turns them back into a raw `.sav`. A padded 512 KB save usually shrinks
+  to a few KB. Saves over 1 MB stay uncompressed, because the DS Lite has
+  only 4 MB of RAM.
+
 ## Controls
 
-| Screen | Button | Action |
+Everything works with the buttons or the stylus.
+
+**Top screen:** the selected game, its save, and its backup history.
+**Bottom screen:** the game list and the action bar.
+
+| Where | Button | Action |
 |---|---|---|
-| Games | Up/Down, Left/Right | Move, page |
-| | A | Open the game's backups |
-| | X | Quick backup (timestamp name) |
-| | L/R | Switch the active kernel |
-| | START | Rescan the SD card |
-| Backups | A on *New backup* | Back up now |
-| | Y on *New backup* | Back up with a name |
-| | A | Restore (hold A to confirm) |
-| | Y | Rename |
-| | X | Move to trash (hold A to confirm) |
-| | SELECT | Export to `_DSavE/export/` |
-| | B | Back to games |
-| Name editor | Up/Down, Left/Right, X | Change letter, move, delete letter |
-| | A / B | Save / cancel |
+| Games | Up/Down, Left/Right | Move, page (or tap and drag the list) |
+| | L/R | Choose a backup in the history |
+| | A | **Backup** the save now (named by date and time) |
+| | B | **Restore** the chosen backup (hold A to confirm) |
+| | X | **Compress** or decompress the chosen backup |
+| | Y | **Rename/Delete**: rename, move to trash, export a `.sav` for PC, or back up with a name |
+| | START | Menu: active kernel, compression, rescan, about |
+| | SELECT | Copies of this save across kernels, and TWiLight slots |
+| Copies | A on a copy | Copy the current save there (hold A) |
+| | A on a slot | Make TWiLight load that slot |
+| | START | Copy the current save to every kernel (hold A) |
+| | Y | Back up the selected copy |
+| | B | Back to the games |
+| Keyboard | Tap, or d-pad and A | Type |
+| | B, L/R | Delete, shift |
+| | START / SELECT | Done / cancel |
 
 ## Building
 
@@ -85,23 +105,31 @@ This produces `DSavE.nds`. Copy it to your SD card and launch it from your
 loader. Every push is also built by GitHub Actions; the `.nds` is attached to
 each run.
 
-The engine in `source/core/` is plain C with no DS dependencies, so it is
-tested on a PC against a fake SD card:
+The engine in `source/core/` and the UI in `source/ui/` are plain C with no
+DS dependencies, so they are tested on a PC against fake SD cards:
 
 ```sh
 make -C tests
 ```
 
+The UI test presses buttons and taps the screen like a player would and
+saves a PNG of both screens after each step in `tests/screenshots/`. CI
+uploads them with each run.
+
+The UI fonts are generated from DejaVu Sans by `tools/make_font.py` (needs
+Pillow) into `source/ui/font_data.c`, which is committed.
+
 ## Roadmap
 
-1. **Kernel profiles** (this release): Pico Launcher, TWiLight Menu++,
+1. **Kernel profiles**: Pico Launcher, TWiLight Menu++,
    akmenu-next, Wood R4, YSMenu and AKAIO save rules, plus backup, restore,
    rename, trash and export.
-2. **Cross-kernel tools**: spot out-of-sync copies of a save when several
-   kernels share a card, copy a save into another kernel's layout, and switch
-   TWiLight save slots.
-3. **Dual-screen UI**: game info and backup history on top, a touch list and
-   button actions on the bottom, plus optional compressed backups.
+2. **Cross-kernel tools**: spot out-of-sync copies of a save
+   when several kernels share a card, copy a save into another kernel's
+   layout, and switch TWiLight save slots.
+3. **Dual-screen UI** (this release): game info and backup history on top,
+   a touch list and button actions on the bottom, plus optional compressed
+   backups.
 4. **Release**: hardware testing on DSpico and Ace3DS X, then a tagged
    release.
 
@@ -112,3 +140,8 @@ DSiWare `.pub`/`.prv` saves, and format conversion (`.dsv`, `.duc`, no$gba).
 
 DSavE is licensed under the GNU General Public License v3.0 or later. See
 [LICENSE](LICENSE).
+
+It includes [miniz](https://github.com/richgel999/miniz) (MIT, see
+`source/third_party/miniz/LICENSE`) and glyphs rendered from
+[DejaVu Sans](https://dejavu-fonts.github.io/) (Bitstream Vera license, see
+`source/ui/fonts/LICENSE-DejaVu.txt`).

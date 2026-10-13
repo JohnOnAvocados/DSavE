@@ -3,8 +3,9 @@
 //   <root>/_DSavE/saves/<GAMECODE> <title>/<backup name>/<title>.sav
 //                                                       /backup.ini
 //
-// The .sav is always a raw, exact-size image, so PC tools and emulators can
-// open it directly. backup.ini records its size and CRC-32, which restore
+// The .sav is a raw image of the save file, so PC tools and emulators can
+// open it directly. With compression on it is <title>.sav.gz instead, a
+// standard gzip file. backup.ini records its size and CRC-32, which restore
 // checks before it touches the live save.
 
 #ifndef DSAVE_BACKUP_H
@@ -30,6 +31,7 @@ typedef enum {
     DSAVE_ERR_WRONG_GAME,     // Backup was made for a different game code
     DSAVE_ERR_EXISTS,         // Target name is already taken
     DSAVE_ERR_ROLLED_BACK,    // Restore failed verification; old save put back
+    DSAVE_ERR_UNSUPPORTED,    // The kernel has no such feature
 } DsaveResult;
 
 const char *dsave_result_str(DsaveResult r);
@@ -44,6 +46,7 @@ typedef struct {
     uint32_t crc32;
     bool has_meta;                // backup.ini was present and readable
     bool is_auto;                 // Made automatically before a restore
+    bool compressed;              // Stored as <title>.sav.gz
 } Backup;
 
 // Paths under <root>/_DSavE.
@@ -82,6 +85,10 @@ DsaveResult backup_restore(const Library *lib, Game *game, const Backup *b,
 DsaveResult backup_restore_to(const Library *lib, Game *game, const Backup *b, int loc,
                               Backup *auto_backup);
 
+// Same, onto any save file path of this game (e.g. a TWiLight slot file).
+DsaveResult backup_restore_path(const Library *lib, Game *game, const Backup *b,
+                                const char *path, Backup *auto_backup);
+
 // How long the restored file will be. Kernels pad saves (TWiLight and Pico
 // both default to 512 KB filled with 0xFF), so:
 //   - no save yet: the backup's size;
@@ -89,6 +96,11 @@ DsaveResult backup_restore_to(const Library *lib, Game *game, const Backup *b, i
 //   - backup larger: the save's size if the extra is all 0xFF, else the
 //     backup's size. Data is never cut off.
 long backup_restore_length(const char *backup_file, long backup_size, long live_size);
+
+// Compress a backup to .sav.gz, or decompress it back to a raw .sav. The new
+// file is written and verified before the old one is removed. Saves larger
+// than SAVEFILE_GZ_MAX are left raw (DSAVE_ERR_UNSUPPORTED).
+DsaveResult backup_set_compressed(const Backup *b, bool compress, Backup *out);
 
 // Rename a backup's folder.
 DsaveResult backup_rename(const Library *lib, const Game *game, const Backup *b,

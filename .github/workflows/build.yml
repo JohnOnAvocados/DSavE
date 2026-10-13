@@ -9,8 +9,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Run host-side engine tests
+      - name: Run host-side engine and UI tests
         run: make -C tests
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ui-screenshots
+          path: tests/screenshots/
 
   nds:
     runs-on: ubuntu-latest
