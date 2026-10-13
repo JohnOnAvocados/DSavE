@@ -1,0 +1,4 @@
+build/
+*.nds
+*.elf
+tests/test_core
