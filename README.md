@@ -93,6 +93,24 @@ Everything works with the buttons or the stylus.
 | | B, L/R | Delete, shift |
 | | START / SELECT | Done / cancel |
 
+## Installing and testing
+
+1. Download `DSavE.nds` from the
+   [latest release](https://github.com/JohnOnAvocados/DSavE/releases), or from
+   the *DSavE* artifact of the latest
+   [CI run](https://github.com/JohnOnAvocados/DSavE/actions) on `main`.
+2. Copy it anywhere on your SD card, for example `_nds/DSavE.nds` or next to
+   your ROMs.
+3. Launch it from your kernel like any homebrew. Kernels patch DLDI for you.
+4. Before trusting it with a save you care about, copy that save to a PC.
+   Then work through the [hardware test checklist](docs/kernels.md#hardware-test-checklist)
+   and report anything odd as a GitHub issue, with the kernel, the flashcart
+   and the game.
+
+Releases are made by pushing a tag that matches `APP_VERSION` in
+`source/ui/app.h` (for example `v0.2.0`, or `v0.2.0-beta1` for a
+pre-release). GitHub Actions builds the ROM and attaches it to the release.
+
 ## Building
 
 DSavE builds with [BlocksDS](https://blocksds.skylyrac.net). With Docker:

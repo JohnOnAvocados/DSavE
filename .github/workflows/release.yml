@@ -1,0 +1,35 @@
+name: Release
+
+# Push a tag like v0.2.0 to build DSavE.nds and publish it as a GitHub
+# Release. The tag must match APP_VERSION in source/ui/app.h.
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    container: skylyrac/blocksds:slim-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check the tag matches APP_VERSION
+        run: |
+          version=$(sed -n 's/^#define APP_VERSION "\(.*\)"/\1/p' source/ui/app.h)
+          tag="${GITHUB_REF_NAME#v}"
+          echo "APP_VERSION=$version tag=$tag"
+          case "$tag" in
+            "$version"|"$version"-*) ;;
+            *) echo "Tag $GITHUB_REF_NAME does not match APP_VERSION $version"; exit 1 ;;
+          esac
+      - name: Build DSavE.nds
+        run: make
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: DSavE.nds
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          generate_release_notes: true
