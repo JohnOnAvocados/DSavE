@@ -13,6 +13,7 @@
 #include "../source/core/kernel.h"
 #include "../source/core/library.h"
 #include "../source/core/rom.h"
+#include "../source/core/savefile.h"
 #include "../source/core/sync.h"
 #include "../source/core/util.h"
 
@@ -908,6 +909,95 @@ static void test_slots(void)
     CHECK(crc_of(slots[5].path) == crc_of_rel("roms/saves/Game.sav2"));
 }
 
+static void test_compression(void)
+{
+    new_card();
+    make_dir("_pico");
+    make_rom("Game.nds", "GAME", "ABCE", NULL);
+    make_save("Game.sav", 512 * KB, 48 * KB, 51);
+    library_scan(&lib, root);
+    CHECK(!lib.compress);
+    CHECK(library_set_compress(&lib, true));
+    library_scan(&lib, root);
+    CHECK(lib.compress); // Remembered in settings.ini
+    Game *g = find_game("ABCE");
+    if (!g)
+        return;
+    uint32_t live = crc_of(g->save_path);
+
+    Backup b;
+    CHECK(backup_create(&lib, g, "packed", false, &b) == DSAVE_OK);
+    CHECK(b.compressed && has_ext(b.file, ".sav.gz"));
+    CHECK(file_size(b.file) < 64 * KB); // 512 KB of mostly padding
+    CHECK(b.size == 512 * KB && b.crc32 == live);
+    CHECK(backup_validate(&b) == DSAVE_OK);
+
+    // It is a standard gzip file.
+    char cmd[DSAVE_PATH_MAX * 2 + 64], out[DSAVE_PATH_MAX];
+    p(out, "gunzipped.sav");
+    snprintf(cmd, sizeof(cmd), "gzip -dc '%s' > '%s'", b.file, out);
+    CHECK(system(cmd) == 0);
+    CHECK(crc_of(out) == live);
+
+    // Listed, restored and exported like a raw backup.
+    Backup list[BACKUP_LIST_MAX];
+    CHECK(backup_list(&lib, g, list, BACKUP_LIST_MAX) == 1 && list[0].compressed);
+    make_save("Game.sav", 512 * KB, 48 * KB, 52);
+    library_refresh_game(&lib, g);
+    Backup safety;
+    CHECK(backup_restore(&lib, g, &list[0], &safety) == DSAVE_OK);
+    CHECK(crc_of(g->save_path) == live && safety.compressed);
+    char exported[DSAVE_PATH_MAX];
+    CHECK(backup_export(&lib, g, &list[0], exported, sizeof(exported)) == DSAVE_OK);
+    CHECK(has_ext(exported, ".sav") && crc_of(exported) == live);
+
+    // Decompress and compress again in place.
+    Backup raw, packed;
+    CHECK(backup_set_compressed(&list[0], false, &raw) == DSAVE_OK);
+    CHECK(!raw.compressed && has_ext(raw.file, ".sav") && !file_exists(list[0].file));
+    CHECK(crc_of(raw.file) == live);
+    CHECK(backup_set_compressed(&raw, true, &packed) == DSAVE_OK);
+    CHECK(packed.compressed && !file_exists(raw.file) && backup_validate(&packed) == DSAVE_OK);
+
+    // A corrupt .gz is refused and the live save is left alone.
+    FILE *f = fopen(packed.file, "r+b");
+    fseek(f, 20, SEEK_SET);
+    fputc(0x00, f);
+    fputc(0x11, f);
+    fclose(f);
+    CHECK(backup_validate(&packed) == DSAVE_ERR_CORRUPT);
+    CHECK(backup_restore(&lib, g, &packed, NULL) == DSAVE_ERR_CORRUPT);
+    CHECK(crc_of(g->save_path) == live);
+
+    // A .sav.gz made by gzip on a PC (with a file name in the header) works.
+    char game_dir[DSAVE_PATH_MAX], bdir[DSAVE_PATH_MAX], src[DSAVE_PATH_MAX];
+    backup_game_dir(&lib, g, game_dir, sizeof(game_dir));
+    path_join(bdir, sizeof(bdir), game_dir, "from pc");
+    mkdir_p(bdir);
+    make_save("pc.sav", 64 * KB, 64 * KB, 53);
+    p(src, "pc.sav");
+    snprintf(cmd, sizeof(cmd), "cd '%s' && gzip -k pc.sav && mv pc.sav.gz '%s/'", root, bdir);
+    CHECK(system(cmd) == 0);
+    int n = backup_list(&lib, g, list, BACKUP_LIST_MAX);
+    bool ok = false;
+    for (int i = 0; i < n; i++)
+    {
+        if (strcmp(list[i].name, "from pc") == 0)
+            ok = list[i].compressed && list[i].size == 64 * KB &&
+                 backup_restore(&lib, g, &list[i], NULL) == DSAVE_OK;
+    }
+    CHECK(ok);
+    CHECK(crc_prefix(g->save_path, 64 * KB) == crc_of(src));
+    CHECK(savefile_tail_is_ff(g->save_path, 64 * KB));
+
+    // Saves over 1 MB stay raw.
+    make_save("Game.sav", 2 * KB * KB, 2 * KB * KB, 54);
+    library_refresh_game(&lib, g);
+    CHECK(backup_create(&lib, g, "big", false, &b) == DSAVE_OK);
+    CHECK(!b.compressed);
+    CHECK(backup_set_compressed(&b, true, NULL) == DSAVE_ERR_UNSUPPORTED);
+}
+
 int main(void)
 {
     char tmpl[] = "/tmp/dsave-test-XXXXXX";
@@ -932,6 +1022,7 @@ int main(void)
     test_sync_padding_edge();
     test_sync_copy_and_all();
     test_slots();
+    test_compression();
 
     library_free(&lib);
     remove_tree(tmpl);
