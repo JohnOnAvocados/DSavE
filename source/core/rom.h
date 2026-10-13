@@ -24,6 +24,24 @@ void rom_parse(RomInfo *info, const uint8_t *header, const uint8_t *titles);
 // header read from a dirty or half-inserted game card fails this.
 bool rom_header_crc_ok(const uint8_t *header);
 
+// A game's 32x32 banner icon, decoded from the DS's 4x4 tiles of 8x8 4-bit
+// pixels. DSi animated icons are shown by their first frame, which every
+// banner also keeps in the DS-format slot.
+#define ROM_ICON_SIZE 32
+
+typedef struct {
+    bool valid;
+    uint8_t px[ROM_ICON_SIZE * ROM_ICON_SIZE]; // Palette index per pixel; 0 is transparent
+    uint16_t pal[16];                          // BGR555
+} RomIcon;
+
+// Decode the 0x200-byte bitmap and 0x20-byte palette at banner+0x20.
+void rom_decode_icon(const uint8_t *bitmap, const uint8_t *palette, RomIcon *icon);
+
+// Read the icon of the ROM at path. Returns false (icon->valid false) if the
+// ROM has no banner.
+bool rom_read_icon(const char *path, RomIcon *icon);
+
 // Fill info from the ROM at path. Returns false if the file is not readable
 // or is too short to be an .nds. A missing or odd banner is not an error;
 // banner_title is then left empty. The banner title is the first of

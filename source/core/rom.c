@@ -12,6 +12,8 @@
 
 // Banner layout (GBATEK "DS Cartridge Icon/Title"): six or more 0x100-byte
 // UTF-16LE titles starting at 0x240, Japanese first, English second.
+#define BANNER_ICON      0x020
+#define BANNER_PALETTE   0x220
 #define BANNER_TITLES    0x240
 #define BANNER_TITLE_LEN 0x100
 #define BANNER_LANGS     6
@@ -127,6 +129,47 @@ void rom_parse(RomInfo *info, const uint8_t *hdr, const uint8_t *titles)
     snprintf(info->banner_title, sizeof(info->banner_title), "%s", first);
 }
 
+void rom_decode_icon(const uint8_t *bitmap, const uint8_t *palette, RomIcon *icon)
+{
+    for (int y = 0; y < ROM_ICON_SIZE; y++)
+    {
+        for (int x = 0; x < ROM_ICON_SIZE; x++)
+        {
+            int tile = (y / 8) * 4 + x / 8;
+            int in = (y % 8) * 8 + x % 8;
+            uint8_t b = bitmap[tile * 32 + in / 2];
+            icon->px[y * ROM_ICON_SIZE + x] = (uint8_t)((in & 1) ? b >> 4 : b & 0x0F);
+        }
+    }
+    for (int i = 0; i < 16; i++)
+        icon->pal[i] = (uint16_t)((palette[i * 2] | (palette[i * 2 + 1] << 8)) & 0x7FFF);
+    icon->valid = true;
+}
+
+static uint32_t banner_offset(const uint8_t *hdr)
+{
+    return (uint32_t)hdr[HDR_BANNER_OFFS] | ((uint32_t)hdr[HDR_BANNER_OFFS + 1] << 8) |
+           ((uint32_t)hdr[HDR_BANNER_OFFS + 2] << 16) | ((uint32_t)hdr[HDR_BANNER_OFFS + 3] << 24);
+}
+
+bool rom_read_icon(const char *path, RomIcon *icon)
+{
+    memset(icon, 0, sizeof(*icon));
+    FILE *f = fopen(path, "rb");
+    if (!f)
+        return false;
+    uint8_t hdr[HDR_SIZE];
+    static uint8_t data[BANNER_TITLES - BANNER_ICON]; // Bitmap, then palette
+    uint32_t banner = 0;
+    bool ok = fread(hdr, 1, sizeof(hdr), f) == sizeof(hdr) && (banner = banner_offset(hdr)) != 0 &&
+              fseek(f, (long)banner + BANNER_ICON, SEEK_SET) == 0 &&
+              fread(data, 1, sizeof(data), f) == sizeof(data);
+    fclose(f);
+    if (ok)
+        rom_decode_icon(data, data + (BANNER_PALETTE - BANNER_ICON), icon);
+    return ok;
+}
+
 bool rom_header_crc_ok(const uint8_t *hdr)
 {
     // CRC-16/MODBUS, as the DS BIOS's swiCRC16 computes it.
@@ -155,10 +198,7 @@ bool rom_read_info(const char *path, RomInfo *info)
         return false;
     }
 
-    uint32_t banner = (uint32_t)hdr[HDR_BANNER_OFFS] |
-                      ((uint32_t)hdr[HDR_BANNER_OFFS + 1] << 8) |
-                      ((uint32_t)hdr[HDR_BANNER_OFFS + 2] << 16) |
-                      ((uint32_t)hdr[HDR_BANNER_OFFS + 3] << 24);
+    uint32_t banner = banner_offset(hdr);
 
     static uint8_t titles[BANNER_LANGS * BANNER_TITLE_LEN];
     bool have = banner != 0 && fseek(f, (long)banner + BANNER_TITLES, SEEK_SET) == 0 &&

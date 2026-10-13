@@ -128,6 +128,10 @@ typedef struct {
     bool kb_shift;
     UiOp kb_op;
 
+    // Icon of the selected game, and the ROM it came from ("" for none).
+    RomIcon icon;
+    char icon_rom[DSAVE_PATH_MAX];
+
     char status[96];
     StatusKind status_kind;
 

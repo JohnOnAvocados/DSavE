@@ -1260,6 +1260,45 @@ static bool chip_is(long n, uint8_t seed)
     return true;
 }
 
+static void test_icon(void)
+{
+    // Pixel (x, y) holds (x + 2y) % 16, laid out in 8x8 tiles.
+    uint8_t bitmap[0x200] = { 0 }, pal[0x20];
+    for (int y = 0; y < 32; y++)
+    {
+        for (int x = 0; x < 32; x++)
+        {
+            int in = (y % 8) * 8 + x % 8, tile = (y / 8) * 4 + x / 8, v = (x + 2 * y) % 16;
+            bitmap[tile * 32 + in / 2] |= (uint8_t)((in & 1) ? v << 4 : v);
+        }
+    }
+    for (int i = 0; i < 16; i++)
+    {
+        pal[i * 2] = (uint8_t)(i * 0x111);
+        pal[i * 2 + 1] = (uint8_t)((i * 0x111) >> 8) | 0x80; // Bit 15 is ignored
+    }
+    RomIcon icon;
+    rom_decode_icon(bitmap, pal, &icon);
+    bool right = icon.valid;
+    for (int y = 0; y < 32; y++)
+        for (int x = 0; x < 32; x++)
+            right &= icon.px[y * 32 + x] == (x + 2 * y) % 16;
+    CHECK(right);
+    CHECK(icon.pal[5] == 0x555 && icon.pal[15] == 0xFFF);
+
+    // From a ROM file: one with a banner, one without.
+    new_card();
+    make_rom("with.nds", "WITH", "ABCE", "With banner");
+    make_rom("without.nds", "WITHOUT", "ABDE", NULL);
+    char path[DSAVE_PATH_MAX];
+    p(path, "with.nds");
+    CHECK(rom_read_icon(path, &icon) && icon.valid);
+    p(path, "without.nds");
+    CHECK(!rom_read_icon(path, &icon) && !icon.valid);
+    p(path, "missing.nds");
+    CHECK(!rom_read_icon(path, &icon));
+}
+
 static void test_card_detect(void)
 {
     static const struct {
@@ -1552,6 +1591,7 @@ int main(void)
     test_titles();
     test_import();
     test_prune_auto();
+    test_icon();
     test_card_detect();
     test_card_write();
     test_card_probe();

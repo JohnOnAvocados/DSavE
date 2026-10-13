@@ -80,6 +80,27 @@ static void make_rom(const char *rel, const char *code, const char *banner)
     uint8_t *en = rom + 0x200 + 0x240 + 0x100;
     for (size_t i = 0; banner[i]; i++)
         en[i * 2] = (uint8_t)banner[i];
+
+    // Icon: a ring in a colour picked from the game code, on a dark square.
+    uint8_t *bitmap = rom + 0x200 + 0x20, *pal = rom + 0x200 + 0x220;
+    unsigned hue = (unsigned)(code[0] * 7 + code[1] * 13 + code[2] * 3) % 6;
+    static const uint16_t rings[6] = { 0x001F, 0x03E0, 0x7C00, 0x03FF, 0x7C1F, 0x7FE0 };
+    uint16_t colours[4] = { 0, 0x1084, rings[hue], 0x7FFF };
+    for (int i = 0; i < 4; i++)
+    {
+        pal[i * 2] = (uint8_t)colours[i];
+        pal[i * 2 + 1] = (uint8_t)(colours[i] >> 8);
+    }
+    for (int y = 0; y < 32; y++)
+    {
+        for (int x = 0; x < 32; x++)
+        {
+            int dx = x * 2 - 31, dy = y * 2 - 31, d = dx * dx + dy * dy;
+            int v = (x < 2 || y < 2 || x > 29 || y > 29) ? 0 : d < 300 ? 3 : d < 700 ? 2 : 1;
+            int in = (y % 8) * 8 + x % 8, tile = (y / 8) * 4 + x / 8;
+            bitmap[tile * 32 + in / 2] |= (uint8_t)((in & 1) ? v << 4 : v);
+        }
+    }
     FILE *f = create(rel);
     fwrite(rom, 1, sizeof(rom), f);
     fclose(f);
@@ -268,6 +289,7 @@ static void test_main_flow(void)
     CHECK(lib.count == 8);
     CHECK(lib.kernels.active == KERNEL_PICO);
     CHECK(app.backups_game == app.game_sel && app.backup_count == 0);
+    CHECK(app.icon.valid && strcmp(app.icon_rom, game()->rom_path) == 0);
     shot("01_games");
 
     // Accented title, sorted by its UTF-8 bytes.
@@ -545,6 +567,7 @@ static void test_game_card(void)
     CHECK(lib.count == 9 && lib.games[0].is_card && app.game_sel == 0);
     CHECK(strcmp(game()->title, "POK\xc3\xa9MON HeartGold Version") == 0);
     CHECK(status_ok() && strstr(app.status, "game card"));
+    CHECK(app.icon.valid && strstr(app.icon_rom, "HeartGold.nds")); // The ROM's icon
     shot("22_card");
 
     // A reads the card into a backup, with a progress bar.
@@ -582,6 +605,7 @@ static void test_game_card(void)
     CHECK(app.status_kind == STATUS_ERROR && game()->is_card && !game()->has_save);
     press(UI_KEY_A);
     CHECK(app.status_kind == STATUS_ERROR && strstr(app.status, "No game card"));
+    CHECK(!app.icon.valid && !app.icon_rom[0]);
     shot("26_card_empty");
     fc.slot_status = CARD_READY;
     press(UI_KEY_A);

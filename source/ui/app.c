@@ -312,6 +312,37 @@ static void ensure_backups(App *app)
     }
 }
 
+// The ROM whose banner gives the selected game's icon: its own, or for a
+// game card, a ROM on the SD card with the same game code.
+static const char *icon_rom(App *app)
+{
+    Game *g = cur_game(app);
+    if (!g)
+        return "";
+    if (!g->is_card)
+        return g->rom_path;
+    for (int i = 0; g->info.game_code[0] && i < app->lib->count; i++)
+    {
+        const Game *o = &app->lib->games[i];
+        if (!o->is_card && strcmp(o->info.game_code, g->info.game_code) == 0)
+            return o->rom_path;
+    }
+    return "";
+}
+
+// Load the selected game's icon when the selection changes. Only one icon
+// is kept, so a card with hundreds of games costs no extra memory.
+static void ensure_icon(App *app)
+{
+    const char *rom = icon_rom(app);
+    if (strcmp(rom, app->icon_rom) == 0)
+        return;
+    snprintf(app->icon_rom, sizeof(app->icon_rom), "%s", rom);
+    if (!rom[0] || !rom_read_icon(rom, &app->icon))
+        app->icon.valid = false;
+    app->dirty = true;
+}
+
 static void select_backup_named(App *app, const char *name)
 {
     for (int i = 0; i < app->backup_count; i++)
@@ -1517,7 +1548,10 @@ void app_update(App *app, const UiInput *in)
         if (app->pending == OP_NONE)
             app->busy[0] = '\0';
         if (app->screen == SCREEN_MAIN)
+        {
             ensure_backups(app);
+            ensure_icon(app);
+        }
         app->touch_was = in->touching;
         app->dirty = true;
         return;
@@ -1541,7 +1575,10 @@ void app_update(App *app, const UiInput *in)
     }
 
     if (app->screen == SCREEN_MAIN && app->pending == OP_NONE)
+    {
         ensure_backups(app);
+        ensure_icon(app);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1714,9 +1751,38 @@ static void draw_status(Canvas *c, const App *app)
                  col == C_MUTED ? C_TEXT : col == C_FAINT ? C_FAINT : col);
 }
 
+#define ICON_X 6
+#define ICON_Y 24
+#define INFO_X (ICON_X + ROM_ICON_SIZE + 6) // Text beside the icon
+
+// A 32x32 game card, for a card whose game has no ROM on the SD card.
+static void draw_card_glyph(Canvas *c, int x, int y, bool ok)
+{
+    Color col = ok ? C_ACCENT : C_FAINT;
+    gfx_rrect(c, x + 3, y + 1, 26, 30, 3, col);
+    gfx_fill(c, x + 21, y + 1, 8, 6, C_BG); // Notched corner
+    gfx_rrect(c, x + 7, y + 6, 13, 12, 2, C_BG);
+    for (int k = 0; k < 6; k++)
+        gfx_fill(c, x + 6 + k * 4, y + 24, 2, 5, C_BG);
+}
+
+static void draw_icon(Canvas *c, const App *app, const Game *g)
+{
+    if (app->icon.valid)
+        gfx_indexed(c, ICON_X, ICON_Y, ROM_ICON_SIZE, ROM_ICON_SIZE, app->icon.px, app->icon.pal, 1);
+    else if (g->is_card)
+        draw_card_glyph(c, ICON_X, ICON_Y, g->has_save);
+    else
+    {
+        gfx_rrect(c, ICON_X, ICON_Y, ROM_ICON_SIZE, ROM_ICON_SIZE, 4, C_PANEL);
+        gfx_text_center(c, &font_small, ICON_X, ICON_Y + 10, ROM_ICON_SIZE, "DS", C_FAINT);
+    }
+}
+
 static void draw_card_info(Canvas *c, const App *app, const Game *g)
 {
-    gfx_text_fit(c, &font_bold, 6, 23, SCREEN_W - 12, g->title, C_TEXT);
+    draw_icon(c, app, g);
+    gfx_text_fit(c, &font_bold, INFO_X, 23, SCREEN_W - 6 - INFO_X, g->title, C_TEXT);
     char line[96], desc[32];
     if (g->has_save)
     {
@@ -1727,14 +1793,14 @@ static void draw_card_info(Canvas *c, const App *app, const Game *g)
         snprintf(line, sizeof(line), "%s  \xc2\xb7  Game card", g->info.game_code);
     else
         snprintf(line, sizeof(line), "Game card in slot 1");
-    gfx_text_fit(c, &font_small, 6, 40, SCREEN_W - 12, line, C_MUTED);
+    gfx_text_fit(c, &font_small, INFO_X, 40, SCREEN_W - 6 - INFO_X, line, C_MUTED);
     if (!g->has_save)
-        draw_wrapped(c, &font_small, 6, 53, SCREEN_W - 12, card_note(app), C_WARN, 2);
+        draw_wrapped(c, &font_small, INFO_X, 53, SCREEN_W - 6 - INFO_X, card_note(app), C_WARN, 2);
     else if (!app->card.chip.writable)
-        gfx_text_fit(c, &font_small, 6, 53, SCREEN_W - 12, "DSavE can back this chip up, but not write to it yet",
-                     C_WARN);
+        draw_wrapped(c, &font_small, INFO_X, 53, SCREEN_W - 6 - INFO_X,
+                     "DSavE can back this chip up, but not write to it yet", C_WARN, 2);
     else
-        gfx_text_fit(c, &font_small, 6, 53, SCREEN_W - 12, "Keep the card in while DSavE reads or writes it",
+        gfx_text_fit(c, &font_small, INFO_X, 53, SCREEN_W - 6 - INFO_X, "Keep the card in while DSavE reads or writes it",
                      C_FAINT);
 }
 
@@ -1745,7 +1811,8 @@ static void draw_game_info(Canvas *c, const App *app, const Game *g)
         draw_card_info(c, app, g);
         return;
     }
-    gfx_text_fit(c, &font_bold, 6, 23, SCREEN_W - 12, g->title, C_TEXT);
+    draw_icon(c, app, g);
+    gfx_text_fit(c, &font_bold, INFO_X, 23, SCREEN_W - 6 - INFO_X, g->title, C_TEXT);
 
     char line[96], save[16], chip[16];
     fmt_size(g->save_size, save, sizeof(save));
@@ -1758,9 +1825,10 @@ static void draw_game_info(Canvas *c, const App *app, const Game *g)
     }
     else
         snprintf(line, sizeof(line), "%s  \xc2\xb7  Save %s", g->info.game_code, save);
-    gfx_text_fit(c, &font_small, 6, 40, SCREEN_W - 12, line, C_MUTED);
+    gfx_text_fit(c, &font_small, INFO_X, 40, SCREEN_W - 6 - INFO_X, line, C_MUTED);
 
-    gfx_text_fit_end(c, &font_small, 6, 53, SCREEN_W - 12, card_path(app->lib, g->save_path), C_FAINT);
+    gfx_text_fit_end(c, &font_small, INFO_X, 53, SCREEN_W - 6 - INFO_X, card_path(app->lib, g->save_path),
+                     C_FAINT);
 
     if (g->primary_is_fallback)
     {
