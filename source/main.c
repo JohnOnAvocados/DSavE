@@ -1,6 +1,6 @@
 // DSavE: a save manager for DS flashcarts and TWiLight Menu++.
 //
-// This is the step 1 front end: a plain text console on both screens that
+// This is the temporary front end: a plain text console on both screens that
 // drives the save engine in source/core. The dual-screen tile UI replaces it
 // in a later step; the engine API stays the same.
 
@@ -13,6 +13,7 @@
 
 #include "core/backup.h"
 #include "core/library.h"
+#include "core/sync.h"
 
 #define APP_VERSION "0.1.0"
 
@@ -22,6 +23,7 @@
 typedef enum {
     VIEW_GAMES,
     VIEW_BACKUPS,
+    VIEW_COPIES, // Every kernel's copy of the save, plus TWiLight slots
 } View;
 
 static PrintConsole top_screen, bottom_screen;
@@ -33,6 +35,11 @@ static int backup_count;
 static View view = VIEW_GAMES;
 static int game_sel, game_scroll;
 static int backup_sel, backup_scroll; // 0 is the "New backup" row
+
+static SyncInfo sync_info;
+static SaveSlot slots[SLOT_MAX];
+static int slot_count;
+static int copy_sel, copy_scroll; // Copies first, then slots
 
 static char status[COLS * 2 + 1];
 static bool status_error;
@@ -88,6 +95,35 @@ static void reload_backups(void)
     int rows = backup_count + 1;
     if (backup_sel >= rows)
         backup_sel = rows - 1;
+}
+
+static void reload_copies(void)
+{
+    Game *g = current_game();
+    if (!g)
+        return;
+    library_refresh_game(&lib, g);
+    sync_check(g, &sync_info);
+    slot_count = 0;
+    const KernelConfig *twl = &lib.kernels.cfg[KERNEL_TWILIGHT];
+    if (twl->installed && twl->twl_location != TWL_GAMES_FOLDER)
+        slot_count = slots_list(&lib, g, KERNEL_TWILIGHT, slots, SLOT_MAX);
+    int rows = g->loc_count + slot_count;
+    if (copy_sel >= rows)
+        copy_sel = rows ? rows - 1 : 0;
+}
+
+// "Pico Launcher, akmenu-next" for the kernels in mask.
+static void kernel_names(KernelMask mask, char *out, size_t size)
+{
+    out[0] = '\0';
+    for (int k = 0; k < KERNEL_COUNT; k++)
+    {
+        if (!(mask & KERNEL_BIT(k)))
+            continue;
+        size_t len = strlen(out);
+        snprintf(out + len, size - len, "%s%s", len ? ", " : "", kernel_name((KernelId)k));
+    }
 }
 
 static void keep_visible(int sel, int *scroll)
@@ -151,6 +187,43 @@ static void draw_top(void)
     {
         printf("\n%d backup%s\n", backup_count, backup_count == 1 ? "" : "s");
     }
+    else if (view == VIEW_COPIES)
+    {
+        static const char *const states[] = {
+            [SYNC_SINGLE] = "One copy only",
+            [SYNC_MATCH] = "\x1b[32mAll copies match\x1b[39m",
+            [SYNC_DIFFERENT] = "\x1b[31mCopies differ\x1b[39m",
+        };
+        printf("\n%s\n", states[sync_info.state]);
+        if (copy_sel < g->loc_count)
+        {
+            const SaveLoc *loc = &g->locs[copy_sel];
+            const LocStatus *st = &sync_info.loc[copy_sel];
+            char names[96];
+            kernel_names(loc->kernels, names, sizeof(names));
+            printf("\n\x1b[33mUsed by\x1b[39m ");
+            put_clipped(names, COLS - 8);
+            printf("\n");
+            put_clipped(loc->path, COLS);
+            printf("\n");
+            if (st->exists)
+            {
+                format_size(loc->size, size, sizeof(size));
+                printf("File %s, data %ld KB\n", size, (st->data_size + 1023) / 1024);
+                printf("%s%s\n", st->same_as_primary ? "Same as current save" : "Differs from current save",
+                       st->newest ? " (newest)" : "");
+            }
+            else
+                printf("No file yet\n");
+        }
+        else
+        {
+            const SaveSlot *sl = &slots[copy_sel - g->loc_count];
+            printf("\n\x1b[33mTWiLight slot %d\x1b[39m%s\n", sl->number, sl->current ? " (current)" : "");
+            put_clipped(sl->path, COLS);
+            printf("\n%s\n", sl->exists ? "Has a save" : "Empty");
+        }
+    }
 
     // Status line at the bottom of the top screen.
     printf("\x1b[23;0H%s", status_error ? "\x1b[31m" : "\x1b[32m");
@@ -176,8 +249,44 @@ static void draw_bottom(void)
             printf("\x1b[39m\n");
         }
         printf("\x1b[21;0H--------------------------------");
-        printf("A: backups   X: quick backup\n");
+        printf("A: backups  X: quick  Y: copies\n");
         printf("L/R: kernel  START: rescan");
+    }
+    else if (view == VIEW_COPIES)
+    {
+        Game *g = current_game();
+        printf("Copies: ");
+        put_clipped(g ? g->title : "", COLS - 8);
+        printf("\n");
+        int rows = g ? g->loc_count + slot_count : 0;
+        keep_visible(copy_sel, &copy_scroll);
+        for (int i = copy_scroll; i < rows && i < copy_scroll + LIST_ROWS; i++)
+        {
+            printf("%s%c ", i == copy_sel ? "\x1b[33m" : "", i == copy_sel ? '>' : ' ');
+            char line[64];
+            if (i < g->loc_count)
+            {
+                char names[96];
+                kernel_names(g->locs[i].kernels, names, sizeof(names));
+                const LocStatus *st = &sync_info.loc[i];
+                char mark = i == g->primary ? '*' : !st->exists ? '-' : st->same_as_primary ? '=' : '!';
+                snprintf(line, sizeof(line), "%c %s", mark, names);
+            }
+            else
+            {
+                const SaveSlot *sl = &slots[i - g->loc_count];
+                snprintf(line, sizeof(line), "%c Slot %d%s", sl->current ? '>' : ' ', sl->number,
+                         sl->exists ? "" : " (empty)");
+            }
+            put_clipped(line, COLS - 2);
+            printf("\x1b[39m\n");
+        }
+        printf("\x1b[20;0H* current  = same  ! differs\n");
+        printf("--------------------------------");
+        if (g && copy_sel < g->loc_count)
+            printf("A: copy current save here\nSTART: copy everywhere  B: back");
+        else
+            printf("A: use this slot\nB: back");
     }
     else
     {
@@ -384,6 +493,42 @@ static void do_export(Backup *b)
                   "Exported to _DSavE/export");
 }
 
+static void do_copy_here(int to)
+{
+    Game *g = current_game();
+    if (to == g->primary)
+    {
+        set_status(false, "That is the current save");
+        return;
+    }
+    char names[96], q[128];
+    kernel_names(g->locs[to].kernels, names, sizeof(names));
+    snprintf(q, sizeof(q), "Copy current save to %.20s?", names);
+    if (!confirm(q, true))
+        return;
+    Backup safety;
+    DsaveResult r = sync_copy(&lib, g, g->primary, to, &safety);
+    result_status(r, safety.name[0] ? "Copied (old file kept as auto_)" : "Copied");
+}
+
+static void do_copy_everywhere(void)
+{
+    if (!confirm("Copy current save to all kernels?", true))
+        return;
+    int copied = 0;
+    DsaveResult r = sync_all(&lib, current_game(), &copied);
+    char msg[COLS * 2 + 1];
+    snprintf(msg, sizeof(msg), "Copied to %d location%s", copied, copied == 1 ? "" : "s");
+    result_status(r, msg);
+}
+
+static void do_use_slot(const SaveSlot *sl)
+{
+    char msg[COLS * 2 + 1];
+    snprintf(msg, sizeof(msg), "TWiLight now uses slot %d", sl->number);
+    result_status(slots_set_current(&lib, current_game(), KERNEL_TWILIGHT, sl->number), msg);
+}
+
 static void rescan(void)
 {
     consoleSelect(&bottom_screen);
@@ -470,6 +615,16 @@ int main(int argc, char **argv)
             }
             if (k & KEY_X)
                 do_backup(NULL);
+            if (k & KEY_Y && current_game())
+            {
+                view = VIEW_COPIES;
+                copy_sel = copy_scroll = 0;
+                status[0] = '\0';
+                set_status(false, "Comparing copies...");
+                draw_top();
+                status[0] = '\0';
+                reload_copies();
+            }
             if (k & KEY_START)
                 rescan();
             if (k & (KEY_L | KEY_R))
@@ -482,6 +637,33 @@ int main(int argc, char **argv)
                     snprintf(msg, sizeof(msg), "Kernel: %s", kernel_name(next));
                     set_status(false, msg);
                 }
+            }
+        }
+        else if (view == VIEW_COPIES)
+        {
+            Game *g = current_game();
+            int rows = g->loc_count + slot_count;
+            if (k & KEY_UP && copy_sel > 0)
+                copy_sel--;
+            if (k & KEY_DOWN && copy_sel + 1 < rows)
+                copy_sel++;
+            if (k & KEY_B)
+            {
+                view = VIEW_GAMES;
+                status[0] = '\0';
+            }
+            else if (k & KEY_START)
+            {
+                do_copy_everywhere();
+                reload_copies();
+            }
+            else if (k & KEY_A)
+            {
+                if (copy_sel < g->loc_count)
+                    do_copy_here(copy_sel);
+                else
+                    do_use_slot(&slots[copy_sel - g->loc_count]);
+                reload_copies();
             }
         }
         else

@@ -61,6 +61,7 @@ saves without a PC.
 | Games | Up/Down, Left/Right | Move, page |
 | | A | Open the game's backups |
 | | X | Quick backup (timestamp name) |
+| | Y | Copies: compare and copy between kernels, TWiLight slots |
 | | L/R | Switch the active kernel |
 | | START | Rescan the SD card |
 | Backups | A on *New backup* | Back up now |
@@ -69,6 +70,10 @@ saves without a PC.
 | | Y | Rename |
 | | X | Move to trash (hold A to confirm) |
 | | SELECT | Export to `_DSavE/export/` |
+| | B | Back to games |
+| Copies | A on a copy | Copy the current save there (hold A) |
+| | START | Copy the current save to every kernel (hold A) |
+| | A on a slot | Make TWiLight use that slot |
 | | B | Back to games |
 | Name editor | Up/Down, Left/Right, X | Change letter, move, delete letter |
 | | A / B | Save / cancel |
@@ -94,12 +99,12 @@ make -C tests
 
 ## Roadmap
 
-1. **Kernel profiles** (this release): Pico Launcher, TWiLight Menu++,
+1. **Kernel profiles**: Pico Launcher, TWiLight Menu++,
    akmenu-next, Wood R4, YSMenu and AKAIO save rules, plus backup, restore,
    rename, trash and export.
-2. **Cross-kernel tools**: spot out-of-sync copies of a save when several
-   kernels share a card, copy a save into another kernel's layout, and switch
-   TWiLight save slots.
+2. **Cross-kernel tools** (this release): spot out-of-sync copies of a save
+   when several kernels share a card, copy a save into another kernel's
+   layout, and switch TWiLight save slots.
 3. **Dual-screen UI**: game info and backup history on top, a touch list and
    button actions on the bottom, plus optional compressed backups.
 4. **Release**: hardware testing on DSpico and Ace3DS X, then a tagged

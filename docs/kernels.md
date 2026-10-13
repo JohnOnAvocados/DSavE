@@ -80,6 +80,30 @@ installed kernel's save path. Kernels that share a path share one entry. The
 2. otherwise the most recently modified save of any kernel, flagged on screen;
 3. otherwise the active kernel's path, where a restore will create the file.
 
+## Comparing and copying between kernels
+
+The **Copies** screen (Y on the game list) lists every kernel's copy of the
+selected game's save:
+
+- `*` is the current save (see above), `=` matches it, `!` differs, and `-`
+  means there is no file yet.
+- Copies are compared by their data with trailing `0xFF` padding ignored. A
+  64 KB exact save and the same data padded to 512 KB count as the same.
+- The newest copy is marked. Remember that TWiLight moves saves out of
+  `saves/` when it launches through a flashcart kernel.
+- **A** copies the current save to the selected kernel's location. **START**
+  copies it to every location, creating missing files, so the game finds the
+  same save whichever kernel launches it. Every file that gets overwritten is
+  first backed up as `auto_<timestamp>`.
+
+### TWiLight save slots
+
+When TWiLight is installed and does not keep saves beside the ROM, the
+Copies screen also lists slots 0–9 (`.sav`, `.sav1`…`.sav9`). **A** on a
+slot writes `SAVE_NUMBER` to the game's
+`_nds/TWiLightMenu/gamesettings/<rom>.ini`, which is exactly what TWiLight's
+own per-game settings menu does. DSavE then works on that slot's file.
+
 ## Restoring onto padded saves
 
 Because kernels pad saves, a backup and the live file can differ in size:
