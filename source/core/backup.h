@@ -116,4 +116,32 @@ DsaveResult backup_trash(const Library *lib, const Game *game, const Backup *b);
 DsaveResult backup_export(const Library *lib, const Game *game, const Backup *b,
                           char *out_path, size_t out_size);
 
+// Auto backups beyond the newest `keep` for this game move to the trash.
+// protect (a backup name, or NULL) is always kept and counts towards keep.
+// Restores and copies call this after making their safety copy, with
+// lib->keep_auto. Returns how many were moved.
+int backup_prune_auto(const Library *lib, const Game *game, int keep, const char *protect);
+
+// Saves from a PC, an emulator or another save manager (Checkpoint, JKSM)
+// are copied into <root>/_DSavE/import/ and imported as a backup of the
+// game the user picks. Raw .sav, DeSmuME .dsv (its footer is dropped) and
+// .sav.gz are accepted; no$gba saves are not.
+#define IMPORT_DIR "_DSavE/import"
+#define IMPORT_LIST_MAX 32
+
+typedef struct {
+    char name[64];
+    char path[DSAVE_PATH_MAX];
+    long size;       // Save data size, -1 if unreadable
+    bool valid;      // size is a DS save size
+} ImportFile;
+
+// List the files in the import folder (creating it), sorted by name.
+int backup_import_list(const Library *lib, ImportFile *out, int max);
+
+// Make a backup named "import_<file name>" from an import file. The file
+// is left where it is. DSavE cannot tell which game a raw save belongs to,
+// so the caller must ask the user.
+DsaveResult backup_import(const Library *lib, const Game *game, const char *path, Backup *out);
+
 #endif

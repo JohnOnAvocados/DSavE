@@ -444,12 +444,58 @@ static void test_empty_card(void)
     CHECK(app.screen == SCREEN_MAIN && app.modal == MODAL_NONE);
     shot("16_empty");
     press(UI_KEY_START);
-    press(UI_KEY_DOWN);
-    press(UI_KEY_DOWN);
-    press(UI_KEY_DOWN);
+    for (int i = 0; i < 4; i++)
+        press(UI_KEY_DOWN);
     press(UI_KEY_A);
     CHECK(app.modal == MODAL_ABOUT);
     shot("17_about");
+}
+
+static void test_import(void)
+{
+    make_pico_card();
+    make_save("_DSavE/import/Kirby from PC.sav", 512 * KB, 3 * KB, 9);
+    make_save("_DSavE/import/broken.sav", 1000, 1000, 9);
+    start_app();
+
+    // Keep auto backups: Right from 10 goes to 20.
+    press(UI_KEY_START);
+    press(UI_KEY_DOWN);
+    press(UI_KEY_DOWN);
+    CHECK(lib.keep_auto == LIBRARY_KEEP_AUTO_DEFAULT);
+    press(UI_KEY_RIGHT);
+    CHECK(lib.keep_auto == 20 && status_ok());
+    shot("18_keep_auto");
+    press(UI_KEY_B);
+
+    // Y, "Import a .sav", lists the import folder.
+    select_game("ATKE");
+    press(UI_KEY_Y);
+    for (int i = 0; i < 5 && app.more_sel != 4; i++)
+        press(UI_KEY_DOWN); // Skips the items that need a backup
+    CHECK(app.more_sel == 4);
+    press(UI_KEY_A);
+    CHECK(app.modal == MODAL_IMPORT && app.import_count == 2);
+    shot("19_import");
+    if (app.import_count != 2)
+        return;
+
+    // The bad size is refused; the good one becomes a backup.
+    int good = strcmp(app.imports[0].name, "Kirby from PC.sav") == 0 ? 0 : 1;
+    CHECK(app.imports[good].valid && !app.imports[1 - good].valid);
+    while (app.import_sel != 1 - good)
+        press(app.import_sel < 1 - good ? UI_KEY_DOWN : UI_KEY_UP);
+    press(UI_KEY_A);
+    CHECK(app.backup_count == 0);
+    while (app.import_sel != good)
+        press(app.import_sel < good ? UI_KEY_DOWN : UI_KEY_UP);
+    press(UI_KEY_A);
+    CHECK(app.modal == MODAL_CONFIRM && !app.dlg_hold);
+    shot("20_import_confirm");
+    press(UI_KEY_A);
+    CHECK(app.modal == MODAL_NONE && status_ok() && app.backup_count == 1);
+    CHECK(strncmp(app.backups[0].name, "import_", 7) == 0);
+    shot("21_imported");
 }
 
 static void test_fonts(void)
@@ -481,6 +527,7 @@ int main(int argc, char **argv)
     test_copies();
     test_touch();
     test_empty_card();
+    test_import();
 
     remove_tree(base);
     library_free(&lib);

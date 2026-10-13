@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 
 #include "ini.h"
 #include "savefile.h"
@@ -143,8 +144,21 @@ DsaveResult backup_create(const Library *lib, const Game *game, const char *name
     return backup_create_from(lib, game, game->save_path, name, allow_blank, out);
 }
 
+static DsaveResult create_backup(const Library *lib, const Game *game, const char *src,
+                                 const char *source_label, const char *name, bool allow_blank,
+                                 Backup *out);
+
 DsaveResult backup_create_from(const Library *lib, const Game *game, const char *src,
                                const char *name, bool allow_blank, Backup *out)
+{
+    return create_backup(lib, game, src, src, name, allow_blank, out);
+}
+
+// source_label is what backup.ini records as the source (the original file
+// when src is a trimmed temporary copy).
+static DsaveResult create_backup(const Library *lib, const Game *game, const char *src,
+                                 const char *source_label, const char *name, bool allow_blank,
+                                 Backup *out)
 {
     if (!file_exists(src))
         return DSAVE_ERR_NO_SAVE;
@@ -194,7 +208,7 @@ DsaveResult backup_create_from(const Library *lib, const Game *game, const char 
     else if (!savefile_crc32(tmp_file, &dst_crc, &dst_size) ||
              dst_crc != src_crc || dst_size != src_size)
         r = DSAVE_ERR_VERIFY;
-    else if (!write_meta(tmp_dir, game, src, created, src_size, src_crc))
+    else if (!write_meta(tmp_dir, game, source_label, created, src_size, src_crc))
         r = DSAVE_ERR_IO;
 
     char final_dir[DSAVE_PATH_MAX];
@@ -250,7 +264,13 @@ static int compare_backups(const void *a, const void *b)
 {
     const Backup *ba = a, *bb = b;
     int c = strcmp(bb->created, ba->created); // Newest first
-    return c ? c : strcmp(ba->name, bb->name);
+    if (c)
+        return c;
+    // Same second: a clash suffix ("_2", "_10") marks the later one.
+    size_t la = strlen(ba->name), lb = strlen(bb->name);
+    if (la != lb)
+        return la < lb ? 1 : -1;
+    return strcmp(bb->name, ba->name);
 }
 
 int backup_list(const Library *lib, const Game *game, Backup *out, int max)
@@ -436,6 +456,7 @@ DsaveResult backup_restore_path(const Library *lib, Game *game, const Backup *b,
         return r;
     if (auto_backup)
         *auto_backup = safety;
+    backup_prune_auto(lib, game, lib->keep_auto, safety.name);
 
     if (write_save_stream(b->file, backup_size, target.path, len, &crc) &&
         matches(target.path, crc, len))
@@ -575,4 +596,166 @@ DsaveResult backup_export(const Library *lib, const Game *game, const Backup *b,
     if (out_path)
         snprintf(out_path, out_size, "%s", target);
     return DSAVE_OK;
+}
+
+// ---------------------------------------------------------------------------
+// Auto backup pruning
+
+int backup_prune_auto(const Library *lib, const Game *game, int keep, const char *protect)
+{
+    if (keep <= 0)
+        return 0;
+    static Backup list[BACKUP_LIST_MAX];
+    int n = backup_list(lib, game, list, BACKUP_LIST_MAX);
+    int autos = 0, trashed = 0;
+    bool protected_seen = false;
+    for (int i = 0; i < n; i++)
+    {
+        if (list[i].is_auto && protect && strcmp(list[i].name, protect) == 0)
+            protected_seen = true;
+    }
+    if (protected_seen)
+        autos = 1;
+    for (int i = 0; i < n; i++) // Newest first
+    {
+        if (!list[i].is_auto || (protected_seen && strcmp(list[i].name, protect) == 0) ||
+            ++autos <= keep)
+            continue;
+        if (backup_trash(lib, game, &list[i]) == DSAVE_OK)
+            trashed++;
+    }
+    return trashed;
+}
+
+// ---------------------------------------------------------------------------
+// Import
+
+#define DSV_MARKER "|<--Snip above here to create a raw sav by excluding this DeSmuME savedata footer:"
+#define DSV_END "|-DESMUME SAVE-|"
+#define NOCASH_MAGIC "NocashGbaBackupMediaSavDataFile"
+
+// Length of the save data in a raw file: everything before a DeSmuME
+// footer, or the whole file. Returns -1 for a no$gba save, whose data is
+// wrapped (and often compressed) in its own format.
+static long raw_data_length(const char *path)
+{
+    long size = file_size(path);
+    if (size < 0)
+        return -1;
+    FILE *f = fopen(path, "rb");
+    if (!f)
+        return -1;
+
+    char head[sizeof(NOCASH_MAGIC)] = "";
+    if (fread(head, 1, sizeof(head) - 1, f) == sizeof(head) - 1 && strcmp(head, NOCASH_MAGIC) == 0)
+    {
+        fclose(f);
+        return -1;
+    }
+
+    // The DeSmuME footer is a marker, a few fields and DSV_END at the end.
+    char tail[256 + 1];
+    long n = size < 256 ? size : 256;
+    long len = size;
+    if (fseek(f, size - n, SEEK_SET) == 0 && fread(tail, 1, (size_t)n, f) == (size_t)n)
+    {
+        long end = (long)strlen(DSV_END);
+        if (n >= end && memcmp(tail + n - end, DSV_END, (size_t)end) == 0)
+        {
+            long marker = (long)strlen(DSV_MARKER);
+            for (long i = n - end - marker; i >= 0; i--)
+            {
+                if (memcmp(tail + i, DSV_MARKER, (size_t)marker) == 0)
+                {
+                    len = size - n + i;
+                    break;
+                }
+            }
+        }
+    }
+    fclose(f);
+    return len;
+}
+
+static bool importable(const char *name)
+{
+    return has_ext(name, ".sav") || has_ext(name, ".dsv") || has_ext(name, ".sav.gz");
+}
+
+static int compare_imports(const void *a, const void *b)
+{
+    return strcasecmp(((const ImportFile *)a)->name, ((const ImportFile *)b)->name);
+}
+
+int backup_import_list(const Library *lib, ImportFile *out, int max)
+{
+    char dir[DSAVE_PATH_MAX];
+    if (!path_join(dir, sizeof(dir), lib->root, IMPORT_DIR))
+        return 0;
+    mkdir_p(dir); // So it is there to copy files into
+    DIR *d = opendir(dir);
+    if (!d)
+        return 0;
+    int n = 0;
+    struct dirent *e;
+    while (n < max && (e = readdir(d)) != NULL)
+    {
+        if (e->d_name[0] == '.' || !importable(e->d_name))
+            continue;
+        ImportFile *f = &out[n];
+        snprintf(f->name, sizeof(f->name), "%s", e->d_name);
+        if (!path_join(f->path, sizeof(f->path), dir, e->d_name) || !file_exists(f->path))
+            continue;
+        f->size = savefile_is_gz(f->path) ? savefile_size(f->path) : raw_data_length(f->path);
+        f->valid = is_valid_save_size(f->size);
+        n++;
+    }
+    closedir(d);
+    qsort(out, (size_t)n, sizeof(ImportFile), compare_imports);
+    return n;
+}
+
+DsaveResult backup_import(const Library *lib, const Game *game, const char *path, Backup *out)
+{
+    if (!file_exists(path))
+        return DSAVE_ERR_NO_SAVE;
+    bool gz = savefile_is_gz(path);
+    long len = gz ? savefile_size(path) : raw_data_length(path);
+    if (!gz && len < 0 && file_size(path) >= 0)
+        return DSAVE_ERR_UNSUPPORTED; // no$gba
+    if (len < 0)
+        return gz ? DSAVE_ERR_CORRUPT : DSAVE_ERR_IO;
+    if (!is_valid_save_size(len))
+        return DSAVE_ERR_BAD_SIZE;
+
+    char stem[DSAVE_PATH_MAX], name[BACKUP_NAME_MAX + 1];
+    path_basename(stem, sizeof(stem), path);
+    if (gz)
+        path_strip_ext(stem);
+    path_strip_ext(stem);
+    snprintf(name, sizeof(name), "import_%s", stem);
+
+    if (gz || len == file_size(path))
+        return create_backup(lib, game, path, path, name, true, out);
+
+    // Trim the emulator footer into a temporary file first.
+    char tmp[DSAVE_PATH_MAX];
+    if (!path_join(tmp, sizeof(tmp), lib->root, APP_DIR "/.import.tmp"))
+        return DSAVE_ERR_PATH;
+    FILE *in = fopen(path, "rb"), *o = fopen(tmp, "wb");
+    bool ok = in && o;
+    uint8_t buf[IO_CHUNK];
+    for (long done = 0; ok && done < len;)
+    {
+        size_t want = (size_t)(len - done < IO_CHUNK ? len - done : IO_CHUNK);
+        ok = fread(buf, 1, want, in) == want && fwrite(buf, 1, want, o) == want;
+        done += (long)want;
+    }
+    if (in)
+        fclose(in);
+    if (o && fclose(o) != 0)
+        ok = false;
+    DsaveResult r = ok ? create_backup(lib, game, tmp, path, name, true, out) : DSAVE_ERR_IO;
+    remove(tmp);
+    return r;
 }

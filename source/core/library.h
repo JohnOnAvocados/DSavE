@@ -52,7 +52,10 @@ typedef struct {
     int count;
     bool truncated;            // More ROMs than LIBRARY_MAX_GAMES
     bool compress;             // Store new backups as .sav.gz
+    int keep_auto;             // Auto backups kept per game, 0 = all
 } Library;
+
+#define LIBRARY_KEEP_AUTO_DEFAULT 10
 
 // Detect kernels, then scan root for .nds/.dsi files (skipping system
 // folders and homebrew), sorted by title. Returns the number of games.
@@ -73,6 +76,11 @@ void library_set_kernel(Library *lib, KernelId id);
 // Turn compression of new backups on or off; remembered in
 // _DSavE/settings.ini.
 bool library_set_compress(Library *lib, bool on);
+
+// How many auto backups (made before a restore or copy) to keep per game;
+// older ones move to the trash. 0 keeps them all. Remembered in
+// _DSavE/settings.ini.
+bool library_set_keep_auto(Library *lib, int keep);
 
 // Find the location entry used by a kernel, or -1.
 int library_loc_for_kernel(const Game *game, KernelId id);
