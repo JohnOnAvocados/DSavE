@@ -26,7 +26,7 @@ typedef struct {
 typedef struct {
     char rom_path[DSAVE_PATH_MAX];
     RomInfo info;
-    char title[64];   // Display title
+    char title[128];  // Display title, UTF-8
     long chip_size;   // Real chip size from Pico's save list, -1 unknown
 
     SaveLoc locs[GAME_MAX_LOCS];

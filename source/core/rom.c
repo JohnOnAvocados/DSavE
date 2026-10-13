@@ -54,15 +54,30 @@ bool rom_read_info(const char *path, RomInfo *info)
     if (banner != 0 && fseek(f, pos, SEEK_SET) == 0 &&
         fread(title, 1, sizeof(title), f) == sizeof(title))
     {
-        // Fold UTF-16 to ASCII and keep only the first line, which is the
+        // Convert UTF-16 to UTF-8 and keep only the first line, which is the
         // game's name; later lines are the subtitle and publisher.
         size_t n = 0;
-        for (size_t i = 0; i + 1 < sizeof(title) && n + 1 < sizeof(info->banner_title); i += 2)
+        for (size_t i = 0; i + 1 < sizeof(title) && n + 4 < sizeof(info->banner_title); i += 2)
         {
             uint16_t ch = (uint16_t)(title[i] | (title[i + 1] << 8));
             if (ch == 0 || ch == '\n')
                 break;
-            info->banner_title[n++] = (ch >= 0x20 && ch <= 0x7E) ? (char)ch : '_';
+            char *out = info->banner_title;
+            if (ch < 0x20 || (ch >= 0x7F && ch < 0xA0) || (ch >= 0xD800 && ch <= 0xDFFF))
+                out[n++] = '_';
+            else if (ch < 0x80)
+                out[n++] = (char)ch;
+            else if (ch < 0x800)
+            {
+                out[n++] = (char)(0xC0 | (ch >> 6));
+                out[n++] = (char)(0x80 | (ch & 0x3F));
+            }
+            else
+            {
+                out[n++] = (char)(0xE0 | (ch >> 12));
+                out[n++] = (char)(0x80 | ((ch >> 6) & 0x3F));
+                out[n++] = (char)(0x80 | (ch & 0x3F));
+            }
         }
         while (n > 0 && info->banner_title[n - 1] == ' ')
             n--;

@@ -216,6 +216,8 @@ static void test_util(void)
     char out[64];
     sanitize_name(out, sizeof(out), "  Pok\xe9mon: Soul/Silver?  ", 40);
     CHECK(strcmp(out, "Pok_mon_ Soul_Silver_") == 0);
+    sanitize_name(out, sizeof(out), "Pok\xc3\xa9mon \xc3\x9c \xe3\x81\x82!", 40);
+    CHECK(strcmp(out, "Pokemon U _!") == 0);
     sanitize_name(out, sizeof(out), "...", 40);
     CHECK(strcmp(out, "unnamed") == 0);
     sanitize_name(out, sizeof(out), "abcdefghij", 4);
@@ -430,6 +432,16 @@ static void test_scan(void)
     Game *pk = find_game("IPGE");
     CHECK(pk && !pk->has_save && pk->save_size == -1);
     CHECK(pk && path_is(pk->save_path, "roms/Pokemon_SoulSilver.sav"));
+
+    // Banner titles keep accents as UTF-8; backup folders fold them.
+    new_card();
+    make_dir("__rpg");
+    make_rom("hg.nds", "POKEMON HG", "IPKE", "POK\xe9MON HeartGold\nNintendo");
+    library_scan(&lib, root);
+    CHECK(lib.count == 1 && strcmp(lib.games[0].title, "POK\xc3\xa9MON HeartGold") == 0);
+    char dir[DSAVE_PATH_MAX];
+    CHECK(lib.count == 1 && backup_game_dir(&lib, &lib.games[0], dir, sizeof(dir)) &&
+          path_is(dir, "_DSavE/saves/IPKE POKeMON HeartGold"));
 }
 
 static void test_multi_kernel_card(void)
