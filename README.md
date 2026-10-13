@@ -99,3 +99,8 @@ make -C tests
 
 Later: physical cartridge saves (DSi with Unlaunch, DS Lite hot-swap), DSiWare
 `.pub`/`.prv` saves, and format conversion (`.dsv`, `.duc`, no$gba).
+
+## License
+
+DSavE is licensed under the GNU General Public License v3.0 or later. See
+[LICENSE](LICENSE).
