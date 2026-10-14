@@ -31,6 +31,10 @@ typedef struct {
     bool infrared;
     bool protect;           // Writes and erases are silently ignored
     int flaky_read;         // This read command (1 = first) gets one wrong byte
+    bool removed;           // Pulled out: every byte reads 0xFF and nothing is written
+    int remove_after_erases;// > 0: pull the card out once this many sectors were erased
+    int remove_after_reads; // > 0: pull the card out once this many read commands started
+    long waited_us;         // Total of the bus's waits
     uint8_t mem[1024 * 1024];
 
     // Counters

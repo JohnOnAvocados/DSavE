@@ -6,6 +6,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+#include <unistd.h>
 
 #include "ini.h"
 #include "savefile.h"
@@ -40,6 +41,7 @@ const char *dsave_result_str(DsaveResult r)
         case DSAVE_ERR_CARD_CHANGED:  return "The game card was removed or changed";
         case DSAVE_ERR_DAMAGED:       return "That save file is damaged";
         case DSAVE_ERR_CARD:          return "The game card's save chip did not answer";
+        case DSAVE_ERR_ROLLBACK_FAILED: return "Restore failed; restore the Auto backup";
     }
     return "Unknown error";
 }
@@ -436,10 +438,16 @@ DsaveResult backup_restore_path(const Library *lib, Game *game, const Backup *b,
         // First save at this location: create it where the kernel looks.
         char dir[DSAVE_PATH_MAX];
         path_dirname(dir, sizeof(dir), target.path);
-        if (!mkdir_p(dir) || !write_save_stream(b->file, backup_size, target.path, len, &crc))
+        if (!mkdir_p(dir))
             return DSAVE_ERR_IO;
+        r = !write_save_stream(b->file, backup_size, target.path, len, &crc) ? DSAVE_ERR_IO
+            : !matches(target.path, crc, len)                                ? DSAVE_ERR_VERIFY
+                                                                             : DSAVE_OK;
+        // Never leave a partial save where the kernel will load it.
+        if (r != DSAVE_OK)
+            remove(target.path);
         library_refresh_game(lib, game);
-        return matches(target.path, crc, len) ? DSAVE_OK : DSAVE_ERR_VERIFY;
+        return r;
     }
 
     // Safety copy of what is there now. Blank saves are kept too: losing a
@@ -461,10 +469,14 @@ DsaveResult backup_restore_path(const Library *lib, Game *game, const Backup *b,
         return DSAVE_OK;
     }
 
-    // Roll back from the safety copy.
-    write_save_stream(safety.file, safety.size, target.path, safety.size, NULL);
+    // Roll back from the safety copy, cutting off anything the failed write
+    // added past the old end, and check the old save really is back.
+    uint32_t old_crc;
+    bool back = write_save_stream(safety.file, safety.size, target.path, safety.size, &old_crc) &&
+                (file_size(target.path) == safety.size || truncate(target.path, safety.size) == 0) &&
+                matches(target.path, old_crc, safety.size);
     library_refresh_game(lib, game);
-    return DSAVE_ERR_ROLLED_BACK;
+    return back ? DSAVE_ERR_ROLLED_BACK : DSAVE_ERR_ROLLBACK_FAILED;
 }
 
 void backup_auto_name(char *out, size_t size)

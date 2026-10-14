@@ -446,7 +446,8 @@ static void card_found_status(App *app)
 static void on_progress(void *ctx, long done, long total)
 {
     App *app = ctx;
-    int p = total > 0 ? (int)(done * 1000 / total) : 0;
+    // long is 32 bits on the DS: done * 1000 overflows past 2 MB.
+    int p = total > 0 ? (int)((long long)done * 1000 / total) : 0;
     if (p < app->progress + 10 && p < 1000)
         return;
     app->progress = p;
@@ -574,7 +575,7 @@ static void run_op(App *app, UiOp op)
                 bool card = g->is_card;
                 DsaveResult r = card ? card_restore(lib, app->card_slot, g, b, &safety, &progress)
                                      : backup_restore(lib, g, b, &safety);
-                if (r == DSAVE_ERR_CARD_CHANGED)
+                if (r == DSAVE_ERR_CARD_CHANGED || (card && r == DSAVE_ERR_ROLLBACK_FAILED))
                     check_card(app);
                 load_backups(app);
                 select_backup_named(app, msg);

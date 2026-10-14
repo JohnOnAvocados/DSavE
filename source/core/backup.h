@@ -36,6 +36,8 @@ typedef enum {
     DSAVE_ERR_CARD_CHANGED,   // The game card was removed or swapped
     DSAVE_ERR_CARD,           // The game card's save chip did not respond
     DSAVE_ERR_DAMAGED,        // An import file's header or packed data is damaged
+    DSAVE_ERR_ROLLBACK_FAILED,// Restore failed and the old save could not be put
+                              // back; the auto backup holds it
 } DsaveResult;
 
 const char *dsave_result_str(DsaveResult r);
