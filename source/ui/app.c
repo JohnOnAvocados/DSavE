@@ -51,14 +51,14 @@
 #define MENU_ITEMS 5
 #define MENU_Y 28
 #define MENU_PITCH 24
-#define MORE_ITEMS 6
-#define MORE_BOX_Y 12
-#define MORE_BOX_H 168
-#define MORE_Y 40
-#define MORE_PITCH 23
+#define MORE_ITEMS 8
+#define MORE_BOX_Y 4
+#define MORE_BOX_H 184
+#define MORE_Y 26
+#define MORE_PITCH 19
 
 // "More" popup items
-enum { MORE_RENAME, MORE_TRASH, MORE_EXPORT_SAV, MORE_EXPORT_DSV, MORE_NEW, MORE_IMPORT };
+enum { MORE_RENAME, MORE_NOTE, MORE_KEEP, MORE_TRASH, MORE_EXPORT_SAV, MORE_EXPORT_DSV, MORE_NEW, MORE_IMPORT };
 #define IMPORT_ROWS 5
 
 // Choices for "Keep auto backups"; 0 keeps all.
@@ -635,6 +635,33 @@ static void run_op(App *app, UiOp op)
             load_backups(app);
             break;
 
+        case OP_NOTE:
+            if (!g || !b)
+                break;
+            {
+                char name[BACKUP_NAME_MAX + 1];
+                snprintf(name, sizeof(name), "%s", b->name);
+                result_status(app, backup_set_note(b, app->kb_text, NULL),
+                              app->kb_text[0] ? "Note saved" : "Note removed");
+                load_backups(app);
+                select_backup_named(app, name);
+            }
+            break;
+
+        case OP_KEEP:
+            if (!g || !b)
+                break;
+            {
+                char name[BACKUP_NAME_MAX + 1];
+                snprintf(name, sizeof(name), "%s", b->name);
+                bool keep = !b->keep;
+                result_status(app, backup_set_keep(b, keep, NULL),
+                              keep ? "Kept: never pruned or trashed" : "No longer kept");
+                load_backups(app);
+                select_backup_named(app, name);
+            }
+            break;
+
         case OP_EXPORT:
         case OP_EXPORT_DSV:
             if (!g || !b)
@@ -964,7 +991,10 @@ static bool more_enabled(App *app, int item)
         return g && g->has_save;
     if (item == MORE_IMPORT)
         return g && g->info.game_code[0]; // An empty card slot has no game to import for
-    return cur_backup(app) != NULL;
+    const Backup *b = cur_backup(app);
+    if (item == MORE_TRASH)
+        return b && !b->keep;
+    return b != NULL;
 }
 
 static void open_import(App *app)
@@ -1018,6 +1048,12 @@ static void more_activate(App *app, int item)
     {
         case MORE_RENAME:
             open_keyboard(app, OP_RENAME, b->name);
+            break;
+        case MORE_NOTE:
+            open_keyboard(app, OP_NOTE, b->note);
+            break;
+        case MORE_KEEP:
+            queue(app, OP_KEEP, b->keep ? "Clearing the Keep mark" : "Marking the backup Keep");
             break;
         case MORE_TRASH:
             backup_label(b, label, sizeof(label));
@@ -1095,7 +1131,9 @@ static void kb_press(App *app, int row, int col)
             set_status(app, STATUS_ERROR, "Type a name first");
             return;
         }
-        queue(app, app->kb_op, app->kb_op == OP_RENAME ? "Renaming the backup" : "Backing up the save");
+        queue(app, app->kb_op, app->kb_op == OP_RENAME ? "Renaming the backup"
+                               : app->kb_op == OP_NOTE ? "Saving the note"
+                                                       : "Backing up the save");
     }
     app->dirty = true;
 }
@@ -1939,6 +1977,13 @@ static void draw_top_main(Canvas *c, const App *app)
             gfx_text_center(c, &font_small, right - 15, y + 0, 15, "gz", C_WHITE);
             right -= 19;
         }
+        if (b->keep)
+        {
+            int kw = gfx_text_width(&font_small, "keep") + 6;
+            gfx_rrect(c, right - kw, y + 2, kw, 11, 3, C_ACCENT);
+            gfx_text_center(c, &font_small, right - kw, y + 0, kw, "keep", C_WHITE);
+            right -= kw + 4;
+        }
         gfx_text_right(c, &font_small, right, y + 1, size, sel ? C_TEXT : C_MUTED);
         char label[64];
         backup_label(b, label, sizeof(label));
@@ -1951,7 +1996,9 @@ static void draw_top_main(Canvas *c, const App *app)
 
     const Backup *b = &app->backups[app->hist_sel];
     char detail[96];
-    if (b->has_meta)
+    if (b->note[0])
+        snprintf(detail, sizeof(detail), "\xe2\x80\x9c%s\xe2\x80\x9d", b->note);
+    else if (b->has_meta)
         snprintf(detail, sizeof(detail), "CRC %08lX  \xc2\xb7  %s", (unsigned long)b->crc32,
                  b->is_auto ? "kept automatically" : b->name);
     else
@@ -2266,13 +2313,18 @@ static void draw_more(Canvas *c, const App *app, const Ctls *ctls)
         snprintf(title, sizeof(title), "No backup selected");
     gfx_text_fit(c, &font_bold, 30, MORE_BOX_Y + 7, 196, title, C_TEXT);
 
-    static const char *const items[MORE_ITEMS] = {
-        [MORE_RENAME] = "Rename backup",          [MORE_TRASH] = "Move backup to trash",
+    const char *items[MORE_ITEMS] = {
+        [MORE_RENAME] = "Rename backup",
+        [MORE_NOTE] = b && b->note[0] ? "Edit note" : "Add a note",
+        [MORE_KEEP] = b && b->keep ? "Stop keeping" : "Keep this backup",
+        [MORE_TRASH] = "Move backup to trash",
         [MORE_EXPORT_SAV] = "Export .sav",        [MORE_EXPORT_DSV] = "Export .dsv",
         [MORE_NEW] = "New backup with a name",    [MORE_IMPORT] = "Import a save\xe2\x80\xa6",
     };
     // Who reads each export format
-    static const char *const hints[MORE_ITEMS] = {
+    const char *hints[MORE_ITEMS] = {
+        [MORE_KEEP] = b && b->keep ? "" : "never pruned",
+        [MORE_TRASH] = b && b->keep ? "kept" : NULL,
         [MORE_EXPORT_SAV] = "melonDS, flashcarts",
         [MORE_EXPORT_DSV] = "DeSmuME, DraStic",
     };
@@ -2353,7 +2405,11 @@ static void draw_keyboard(Canvas *c, const App *app, const Ctls *ctls)
     if (app->kb_text[0])
         x += gfx_text_fit_end(c, &font_body, 10, 7, 176, app->kb_text, C_TEXT);
     else
-        gfx_text(c, &font_body, 10, 7, app->kb_op == OP_RENAME ? "Name" : "Name (blank for date)", C_FAINT);
+        gfx_text(c, &font_body, 10, 7,
+                 app->kb_op == OP_RENAME ? "Name"
+                 : app->kb_op == OP_NOTE ? "Note (blank to remove)"
+                                         : "Name (blank for date)",
+                 C_FAINT);
     if (app->kb_text[0])
         gfx_fill(c, x + 1, 8, 1, 15, C_ACCENT);
     const Ctl *cancel = find_ctl(ctls, ID_KB_CANCEL);

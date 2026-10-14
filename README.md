@@ -34,6 +34,9 @@ your game saves without a PC.
 - **Keeps as many named backups as you like.** A backup is named with a
   timestamp by default, and you can rename it on the touch keyboard. Backups
   are plain `.sav` files that emulators and PC save editors open directly.
+  Give a backup a short note ("before the final boss") with *Add a note*
+  under Y, and mark the ones that matter with *Keep this backup*. A kept
+  backup is never pruned and can't be moved to the trash until you unmark it.
 - **Restores safely.** Every backup is checked (size, CRC-32 and game code)
   before anything is written, the current save is backed up first, and the
   result is read back and rolled back if it does not match.
@@ -219,7 +222,7 @@ Everything works with the buttons or the stylus.
 | | A | **Backup** the save now (named by date and time); on an empty game card row, check slot 1 again |
 | | B | **Restore** the chosen backup (hold A to confirm) |
 | | X | **Compress** or decompress the chosen backup |
-| | Y | **Rename/Delete**: rename, move to trash, export a `.sav` or `.dsv` for emulators, back up with a name, or import a save |
+| | Y | **Rename/Delete**: rename, add a note, keep, move to trash, export a `.sav` or `.dsv` for emulators, back up with a name, or import a save |
 | | START | Menu: active kernel, compression, auto backups to keep, rescan, about |
 | | SELECT | Copies of this save across kernels, and TWiLight slots |
 | Copies | A on a copy | Copy the current save there (hold A) |
