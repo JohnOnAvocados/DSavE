@@ -281,6 +281,26 @@ static void kernel_names(KernelMask mask, char *out, size_t size)
     }
 }
 
+// "public 256 KB, private 16 KB, banner": the files a DSiWare title saves
+// to, from its header.
+static void dsi_parts_text(const RomInfo *info, char *out, size_t size)
+{
+    static const char *const names[DSI_PARTS] = { "public", "private", "banner" };
+    out[0] = '\0';
+    for (int p = 0; p < DSI_PARTS; p++)
+    {
+        if (!rom_dsi_has_part(info, (DsiPart)p))
+            continue;
+        char sz[16] = "";
+        if (p != DSI_BANNER)
+            fmt_size(rom_dsi_part_size(info, (DsiPart)p), sz, sizeof(sz));
+        size_t len = strlen(out);
+        snprintf(out + len, size - len, "%s%s%s%s", len ? ", " : "", names[p], sz[0] ? " " : "", sz);
+    }
+    if (!out[0])
+        snprintf(out, size, "no save files");
+}
+
 static void keep_visible(int sel, int *scroll, int rows, int count)
 {
     if (sel < *scroll)
@@ -313,7 +333,10 @@ static void load_backups(App *app)
     Game *g = cur_game(app);
     app->backup_count = g ? backup_list(app->lib, g, app->backups, BACKUP_LIST_MAX) : 0;
     for (int i = 0; i < app->backup_count; i++)
-        app->backup_disk[i] = file_size(app->backups[i].file);
+    {
+        const Backup *b = &app->backups[i];
+        app->backup_disk[i] = b->dsiware ? backup_data_size(b) : file_size(b->file);
+    }
     app->backups_game = app->game_sel;
     app->hist_sel = clampi(app->hist_sel, 0, app->backup_count ? app->backup_count - 1 : 0);
     keep_visible(app->hist_sel, &app->hist_scroll, HIST_ROWS, app->backup_count);
@@ -827,6 +850,8 @@ static void run_op(App *app, UiOp op)
                 select_backup_named(app, msg);
                 if (r == DSAVE_ERR_UNSUPPORTED)
                     set_status(app, STATUS_ERROR, "Saves over 1 MB are kept uncompressed");
+                else if (r == DSAVE_ERR_DSIWARE)
+                    set_status(app, STATUS_ERROR, "DSiWare backups are kept uncompressed");
                 else if (r != DSAVE_OK)
                     result_status(app, r, "");
                 else
@@ -906,7 +931,10 @@ static void run_op(App *app, UiOp op)
                 if (r == DSAVE_OK)
                     log_act(app, ACT_EXPORT, g, b, NULL, path);
                 path_basename(base, sizeof(base), path);
-                snprintf(msg, sizeof(msg), "Exported to _DSavE/export/%s", base);
+                if (g->info.dsiware)
+                    snprintf(msg, sizeof(msg), "Exported .pub, .prv, .bnr to _DSavE/export");
+                else
+                    snprintf(msg, sizeof(msg), "Exported to _DSavE/export/%s", base);
                 result_status(app, r, msg);
             }
             break;
@@ -1112,7 +1140,12 @@ static void act_restore(App *app)
                     label);
         return;
     }
-    if (g->has_save)
+    if (g->info.dsiware && g->has_save)
+        confirm(app, OP_RESTORE, true, "Restore this backup?",
+                "\"%s\" replaces this DSiWare save: %s and the files beside it. The current files are "
+                "backed up first.",
+                label, file);
+    else if (g->has_save)
         confirm(app, OP_RESTORE, true, "Restore this backup?",
                 "\"%s\" replaces the save in %s. The current save is backed up first.", label, file);
     else
@@ -1129,6 +1162,11 @@ static void act_compress(App *app)
     if (!b)
     {
         set_status(app, STATUS_ERROR, "No backup selected");
+        return;
+    }
+    if (b->dsiware)
+    {
+        set_status(app, STATUS_ERROR, "DSiWare backups are kept uncompressed");
         return;
     }
     if (!b->compressed && b->size > SAVEFILE_GZ_MAX)
@@ -1314,6 +1352,8 @@ static bool more_enabled(App *app, int item)
     const Backup *b = cur_backup(app);
     if (item == MORE_TRASH)
         return b && !b->keep;
+    if (item == MORE_EXPORT_DSV)
+        return b && g && !g->info.dsiware; // DeSmuME has no DSiWare saves
     return b != NULL;
 }
 
@@ -2313,7 +2353,10 @@ static void draw_game_info(Canvas *c, const App *app, const Game *g)
 
     char line[96], save[16], chip[16];
     fmt_size(g->save_size, save, sizeof(save));
-    if (!g->has_save)
+    if (g->info.dsiware)
+        snprintf(line, sizeof(line), "%s  \xc2\xb7  DSiWare  \xc2\xb7  %s%s", g->info.game_code,
+                 g->has_save ? "Save " : "No save yet", g->has_save ? save : "");
+    else if (!g->has_save)
         snprintf(line, sizeof(line), "%s  \xc2\xb7  No save yet", g->info.game_code);
     else if (g->chip_size > 0 && g->chip_size != g->save_size)
     {
@@ -2337,6 +2380,13 @@ static void draw_game_info(Canvas *c, const App *app, const Game *g)
     else if (!g->has_save)
         gfx_text_fit(c, &font_small, 6, 67, SCREEN_W - 12, "Play the game once, or restore a backup",
                      C_FAINT);
+    else if (g->info.dsiware)
+    {
+        char parts[96];
+        dsi_parts_text(&g->info, parts, sizeof(parts));
+        snprintf(line, sizeof(line), "Save files: %s", parts);
+        gfx_text_fit(c, &font_small, 6, 67, SCREEN_W - 12, line, C_FAINT);
+    }
 }
 
 static void draw_top_main(Canvas *c, const App *app)
@@ -2390,7 +2440,7 @@ static void draw_top_main(Canvas *c, const App *app)
             gfx_fill(c, 7, y + 2, 2, HIST_ROW_H - 4, C_ACCENT);
         }
         char size[40], raw[16], disk[16];
-        fmt_size(b->size, raw, sizeof(raw));
+        fmt_size(backup_data_size(b), raw, sizeof(raw));
         if (b->compressed)
         {
             fmt_size(app->backup_disk[i], disk, sizeof(disk));
@@ -2427,6 +2477,19 @@ static void draw_top_main(Canvas *c, const App *app)
     char detail[96];
     if (b->note[0])
         snprintf(detail, sizeof(detail), "\xe2\x80\x9c%s\xe2\x80\x9d", b->note);
+    else if (b->dsiware)
+    {
+        // Which DSiWare files it holds
+        char parts[48] = "";
+        for (int p = 0; p < DSI_PARTS; p++)
+        {
+            size_t len = strlen(parts);
+            if (b->part_size[p] >= 0)
+                snprintf(parts + len, sizeof(parts) - len, "%s%s", len ? " + " : "",
+                         p == DSI_PUBLIC ? "public" : p == DSI_PRIVATE ? "private" : "banner");
+        }
+        snprintf(detail, sizeof(detail), "%s  \xc2\xb7  %s", parts, b->is_auto ? "kept automatically" : b->name);
+    }
     else if (b->has_meta)
         snprintf(detail, sizeof(detail), "CRC %08lX  \xc2\xb7  %s", (unsigned long)b->crc32,
                  b->is_auto ? "kept automatically" : b->name);
@@ -2557,7 +2620,7 @@ static void draw_bottom_main(Canvas *c, const App *app, const Ctls *ctls)
         draw_button(c, app, find_ctl(ctls, ID_ACT_A), "A", "Backup", g && g->has_save);
     draw_button(c, app, find_ctl(ctls, ID_ACT_B), "B", "Restore", b != NULL);
     draw_button(c, app, find_ctl(ctls, ID_ACT_X), "X", b && b->compressed ? "Decompress" : "Compress",
-                b && (b->compressed || b->size <= SAVEFILE_GZ_MAX));
+                b && !b->dsiware && (b->compressed || b->size <= SAVEFILE_GZ_MAX));
     draw_button(c, app, find_ctl(ctls, ID_ACT_Y), "Y", "Rename/Delete", g != NULL);
 }
 
@@ -2763,13 +2826,16 @@ static void draw_more(Canvas *c, const App *app, const Ctls *ctls)
         snprintf(title, sizeof(title), "No backup selected");
     gfx_text_fit(c, &font_bold, 30, MORE_BOX_Y + 7, 196, title, C_TEXT);
 
+    const Game *g = cur_game((App *)app);
+    bool dsi = g && g->info.dsiware;
     const char *items[MORE_ITEMS] = {
         [MORE_RENAME] = "Rename backup",
         [MORE_NOTE] = b && b->note[0] ? "Edit note" : "Add a note",
         [MORE_KEEP] = b && b->keep ? "Stop keeping" : "Keep this backup",
         [MORE_TRASH] = "Move backup to trash",
         [MORE_HEX] = "View in hex",
-        [MORE_EXPORT_SAV] = "Export .sav",        [MORE_EXPORT_DSV] = "Export .dsv",
+        [MORE_EXPORT_SAV] = dsi ? "Export .pub/.prv" : "Export .sav",
+        [MORE_EXPORT_DSV] = "Export .dsv",
         [MORE_NEW] = "New backup with a name",    [MORE_IMPORT] = "Import a save\xe2\x80\xa6",
     };
     // Who reads each export format
@@ -2777,8 +2843,8 @@ static void draw_more(Canvas *c, const App *app, const Ctls *ctls)
         [MORE_KEEP] = b && b->keep ? "" : "never pruned",
         [MORE_TRASH] = b && b->keep ? "kept" : NULL,
         [MORE_HEX] = "and compare",
-        [MORE_EXPORT_SAV] = "melonDS, flashcarts",
-        [MORE_EXPORT_DSV] = "DeSmuME, DraStic",
+        [MORE_EXPORT_SAV] = dsi ? "TWiLight, Pico" : "melonDS, flashcarts",
+        [MORE_EXPORT_DSV] = dsi ? "not for DSiWare" : "DeSmuME, DraStic",
     };
     for (int i = 0; i < MORE_ITEMS; i++)
     {
@@ -2807,9 +2873,9 @@ static void draw_import(Canvas *c, const App *app, const Ctls *ctls)
         draw_wrapped(c, &font_small, 10, 34, SCREEN_W - 20,
                      "No saves to import. Copy saves into the _DSavE/import folder on the SD card, "
                      "then open this again. DSavE reads .sav (melonDS, Checkpoint, JKSM), .dsv "
-                     "(DeSmuME, DraStic), no$gba, Action Replay .duc and .sav.gz files. A save "
-                     "named after a ROM goes into that game.",
-                     C_MUTED, 7);
+                     "(DeSmuME, DraStic), no$gba, Action Replay .duc and .sav.gz files, and "
+                     "DSiWare .pub/.prv/.bnr. A save named after a ROM goes into that game.",
+                     C_MUTED, 8);
     }
     for (int i = 0; i < IMPORT_ROWS && app->import_scroll + i < app->import_count; i++)
     {
@@ -2825,7 +2891,7 @@ static void draw_import(Canvas *c, const App *app, const Ctls *ctls)
         if (f->valid)
         {
             fmt_size(f->size, size, sizeof(size));
-            const char *fmt = emusave_format_name(f->format);
+            const char *fmt = f->dsiware ? "DSiWare" : emusave_format_name(f->format);
             snprintf(right, sizeof(right), "%s%s%s", fmt, fmt[0] ? " \xc2\xb7 " : "", size);
         }
         else
@@ -2870,7 +2936,11 @@ static void draw_top_hex(Canvas *c, const App *app)
     backup_label(b, label, sizeof(label));
     gfx_text_fit(c, &font_bold, 6, 24, SCREEN_W - 12, label, C_TEXT);
     fmt_size(app->hex_size, size, sizeof(size));
-    snprintf(line, sizeof(line), "%s  \xc2\xb7  %s%s", g->title, size, b->compressed ? ", from .gz" : "");
+    char file[DSAVE_PATH_MAX] = "";
+    if (b->dsiware)
+        path_basename(file, sizeof(file), b->file); // The main part: public.sav, mostly
+    snprintf(line, sizeof(line), "%s  \xc2\xb7  %s%s%s%s", g->title, size, b->compressed ? ", from .gz" : "",
+             file[0] ? ", " : "", file);
     gfx_text_fit(c, &font_small, 6, 41, SCREEN_W - 12, line, C_MUTED);
 
     gfx_rrect(c, 4, 58, SCREEN_W - 8, STATUS_Y - 60, 6, C_PANEL);

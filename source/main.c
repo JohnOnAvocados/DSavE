@@ -103,6 +103,8 @@ int main(int argc, char **argv)
 
     char root[DSAVE_PATH_MAX];
     find_root(root, sizeof(root));
+    // TWiLight lays DSiWare saves out by console mode (library.h).
+    lib.dsi_mode = isDSiMode();
     app_init(&app, &lib, root, card_slot_get(root));
     app.present = present_now;
 

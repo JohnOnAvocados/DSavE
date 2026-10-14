@@ -64,6 +64,11 @@ your game saves without a PC.
   layout, and switch TWiLight Menu++ save slots.
 - **Backs up and restores retail game cards** on a DSi, or a 3DS running
   TWiLight Menu++ or Unlaunch.
+- **Handles DSiWare saves.** A DSiWare title saves to up to three files
+  (`public.sav`, `private.sav` and `banner.sav` on a DSi), which loaders on
+  an SD card keep beside the ROM as `.pub`, `.prv` and `.bnr`. DSavE backs
+  them up together, restores them together, and follows TWiLight Menu++'s
+  save slots and save location. See [DSiWare](#dsiware).
 - **Never hard-deletes anything.** Deleted and pruned backups go to
   `_DSavE/_TRASH_/`.
 
@@ -72,6 +77,10 @@ your game saves without a PC.
 ```
 _DSavE/saves/<GAMECODE> <title>/<backup name>/<title>.sav     (or .sav.gz)
                                              /backup.ini      size, CRC-32, date
+_DSavE/saves/<GAMECODE> <title>/<backup name>/public.sav      DSiWare: each file
+                                             /private.sav     the title has
+                                             /banner.sav
+                                             /backup.ini      each one's size and CRC-32
 _DSavE/export/    exported saves (<rom name>.sav or .dsv)
 _DSavE/import/    saves to import as backups
 _DSavE/_TRASH_/   deleted backups
@@ -101,6 +110,12 @@ A new backup is written to a hidden temp folder, verified, and only then
 renamed into place. A blank save (all `00` or all `FF`) is flagged rather
 than silently kept.
 
+A DSiWare restore works the same way on all of the title's files at once:
+every file is checked, the current files are backed up together as one
+`auto_` backup, each file is overwritten in place at its exact size (they
+are disk images, so they are never padded), and if any file does not read
+back right, every file is put back.
+
 ### Importing and exporting
 
 Put a save in `_DSavE/import/`, choose the game, then *Import a save* under Y.
@@ -115,12 +130,14 @@ save named after a ROM on the card (`Mario Kart DS.dsv` for
 | `.sav` with a no$gba header | no$gba, packed or not |
 | `.duc`, `.dss` | Action Replay DS save tools |
 | `.sav.gz` | DSavE's own compressed backups |
+| `.pub`, `.prv`, `.bnr` | DSiWare saves from Pico Loader or TWiLight Menu++ (the files with the same name come along) |
 
 Under Y, *Export .sav* writes the raw save (melonDS, flashcarts) and
 *Export .dsv* adds DeSmuME's footer (DeSmuME, DraStic). The file is named
 after the ROM and replaces an earlier export of that game. When the chip size
 is known (Pico's save list, or a game card), a kernel's `0xFF` padding is cut
-off so the emulator sees the right chip.
+off so the emulator sees the right chip. A DSiWare backup exports as
+`<rom>.pub`, `.prv` and `.bnr` instead, and has no `.dsv`.
 
 ## Hardware support
 
@@ -158,15 +175,39 @@ so game cards are not available.
 The game card path has been tested against a simulated chip only. It has not
 yet been run on a DSi or 3DS.
 
+### DSiWare
+
+A DSiWare title (a `.nds` whose DSi header says it is installed to NAND,
+title ID `00030004`) keeps its save in up to three files of sizes fixed by
+its header. DSavE finds them where each loader puts them:
+
+| Loader | Save files | Slots |
+|---|---|---|
+| Pico Loader (Pico Launcher) | `<rom>.pub`, `.prv`, `.bnr` beside the ROM | none |
+| TWiLight Menu++, DSi mode | `<rom>.pub`, `.prv`, `.bnr` in its save folder | `.puN`, `.prN`, `.bnN` |
+| TWiLight Menu++, DS mode (nds-bootstrap B4DS) | `<rom>.sav` (the public save) and `<rom>.bnr` in its save folder | `.savN`, `.bnN` |
+
+TWiLight's save folder follows its *Save location* setting, as for DS games.
+Which of TWiLight's layouts a card uses is read from the files already
+there; for a title with no save yet, DSavE assumes the layout of the mode it
+is running in. The other kernels (akmenu-next, Wood, YSMenu, AKAIO) don't
+run DSiWare. DSavE never reads or writes the DSi's own NAND. See
+[docs/kernels.md](docs/kernels.md#dsiware-saves) for the rules and their
+sources.
+
+DSiWare backups are never compressed. The hex viewer and compare show the
+public save (or the private one, for a title without one).
+
 ### What has been tested
 
 | Area | Tested how |
 |---|---|
-| Save engine (backup, restore, compression, import, export, sync) | Automated tests on a PC against simulated SD cards, on every push |
+| Save engine (backup, restore, compression, import, export, sync, DSiWare) | Automated tests on a PC against simulated SD cards, on every push |
 | User interface | Automated tests on a PC that press buttons, tap the screen and save screenshots |
 | Game card protocol | Automated tests against a simulated save chip |
 | no$gba and Action Replay import | Files built by the tests, not files from the real tools |
 | Each kernel on real hardware | In progress; see the [hardware test checklist](docs/kernels.md#hardware-test-checklist) |
+| DSiWare saves on real hardware | Not yet; built from the loaders' source code and tested against simulated cards ([checklist](docs/kernels.md#dsiware)) |
 
 If you test DSavE on hardware, please report what worked and what didn't (see
 [Contributing](#contributing)) so the tables above can be updated.
@@ -349,7 +390,7 @@ a PC. Only `source/main.c` and `source/platform/` touch the DS hardware.
 | `source/ui/app.c` | The whole user interface: game list, backup history, menus, the copies screen and the touch keyboard. It takes input and draws to two canvases, with no DS headers. |
 | `source/ui/gfx.c`, `font_data.c` | A small 2D renderer (rectangles, circles, antialiased text) for BGR555 bitmaps, and the generated fonts. |
 | `source/core/kernel.c` | Kernel profiles: how each kernel names, places, sizes and slots its save files, read from its settings files. |
-| `source/core/library.c`, `rom.c` | Finds the ROMs on the card, reads their headers and banners, and pairs each with its live save for every installed kernel. |
+| `source/core/library.c`, `rom.c` | Finds the ROMs on the card, reads their headers and banners (and the DSi header of DSiWare), and pairs each with its live save for every installed kernel. |
 | `source/core/backup.c` | Backups, restores, auto backups and pruning, renames, trash, import and export. Writes go through a temp file, are verified, and are only then moved into place. |
 | `source/core/savefile.c` | Reads raw `.sav` and gzip `.sav.gz` saves (using miniz). |
 | `source/core/sync.c` | Cross-kernel tools: compares a game's copies, copies a save into another kernel's layout, and manages save slots. |
@@ -366,7 +407,7 @@ a PC. Only `source/main.c` and `source/platform/` touch the DS hardware.
 Done: kernel profiles and backup, restore, rename, trash and export (v0.1);
 cross-kernel tools and the dual-screen touch UI with compression (v0.2);
 import, auto backup pruning, game card saves in DSi mode, the game's icon,
-and emulator saves (v0.3).
+and emulator saves (v0.3); DSiWare saves (v0.6).
 
 Next:
 
@@ -374,7 +415,6 @@ Next:
 2. Quality of life: back up every changed save at once, skip duplicate
    backups, mark the backup that is loaded, and sort and filter the list.
 3. A trash browser to restore deleted backups.
-4. DSiWare `.pub`/`.prv` saves.
 
 Later: game cards on a DS Lite (hot-swap), and writing Band Brothers DX's
 8 MB chip.

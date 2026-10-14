@@ -300,6 +300,37 @@ bool kernel_save_path(const KernelSet *ks, KernelId id, const char *rom_path,
     return path_join(out, size, folder, name);
 }
 
+bool kernel_runs_dsiware(KernelId id)
+{
+    return id == KERNEL_PICO || id == KERNEL_TWILIGHT || id == KERNEL_GENERIC;
+}
+
+bool kernel_dsiware_path(const KernelSet *ks, KernelId id, const char *rom_path, int slot,
+                         DsiLayout layout, DsiPart part, char *out, size_t size)
+{
+    if (!kernel_runs_dsiware(id) || layout == DSI_LAYOUT_NONE || part >= DSI_PARTS ||
+        (layout == DSI_LAYOUT_SAV && id != KERNEL_TWILIGHT))
+        return false;
+    // Same folder and slot rules as the kernel's .sav, which these kernels
+    // all name "<rom name>.sav" or "<rom name>.savN".
+    char path[DSAVE_PATH_MAX];
+    if (!kernel_save_path(ks, id, rom_path, slot, path, sizeof(path)))
+        return false;
+    if (layout == DSI_LAYOUT_SIDECAR || part == DSI_BANNER)
+    {
+        // TWiLight's getPubExtension and friends; Pico Loader's
+        // DsiWareSaveArranger swaps the ROM's extension the same way.
+        static const char *const ext[DSI_PARTS] = { "pub", "prv", "bnr" };
+        char *dot = strrchr(path, '.');
+        size_t room = sizeof(path) - (size_t)(dot - path);
+        int n = slot ? snprintf(dot, room, ".%.2s%d", ext[part], slot) : snprintf(dot, room, ".%s", ext[part]);
+        if (n < 0 || (size_t)n >= room)
+            return false;
+    }
+    int n = snprintf(out, size, "%s", path);
+    return n >= 0 && (size_t)n < size;
+}
+
 long kernel_chip_size(const KernelSet *ks, const char *game_code)
 {
     if (!ks->savelist || strlen(game_code) != 4)
