@@ -57,7 +57,7 @@ typedef enum {
     MODAL_NONE,
     MODAL_CONFIRM,
     MODAL_MENU,
-    MODAL_MORE,     // Rename / Delete / Export popup
+    MODAL_MORE,     // Rename / Note / Keep / Delete / Export popup
     MODAL_KEYBOARD,
     MODAL_ABOUT,
     MODAL_IMPORT,   // Files in _DSavE/import
@@ -85,6 +85,8 @@ typedef enum {
     OP_USE_SLOT,
     OP_IMPORT,
     OP_CARD_CHECK,    // Look at slot 1 again
+    OP_NOTE,          // Set the selected backup's note from the keyboard
+    OP_KEEP,          // Toggle the selected backup's Keep mark
 } UiOp;
 
 typedef enum {

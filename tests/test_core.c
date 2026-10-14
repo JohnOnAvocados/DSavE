@@ -1281,6 +1281,109 @@ static void test_prune_auto(void)
     CHECK(backup_prune_auto(&lib, g, 0, NULL) == 0);
 }
 
+static void test_note_and_keep(void)
+{
+    new_card();
+    make_dir("_pico");
+    make_rom("Game.nds", "GAME", "ABCE", NULL);
+    make_save("Game.sav", 64 * KB, 16 * KB, 71);
+    library_scan(&lib, root);
+    Game *g = find_game("ABCE");
+    if (!g)
+        return;
+
+    Backup b, u;
+    CHECK(backup_create(&lib, g, "boss", false, &b) == DSAVE_OK);
+    CHECK(b.note[0] == '\0' && !b.keep);
+
+    // A note survives listing, a rename and compression.
+    CHECK(backup_set_note(&b, "before the\nfinal boss", &u) == DSAVE_OK);
+    CHECK(strcmp(u.note, "before the final boss") == 0);
+    CHECK(backup_rename(&lib, g, &b, "boss2") == DSAVE_OK);
+    Backup list[BACKUP_LIST_MAX];
+    int n = backup_list(&lib, g, list, BACKUP_LIST_MAX);
+    CHECK(n == 1 && strcmp(list[0].note, "before the final boss") == 0);
+    CHECK(backup_validate(&list[0]) == DSAVE_OK); // Size and CRC still read
+    CHECK(backup_set_compressed(&list[0], true, &u) == DSAVE_OK);
+    n = backup_list(&lib, g, list, BACKUP_LIST_MAX);
+    CHECK(n == 1 && list[0].compressed && strcmp(list[0].note, "before the final boss") == 0);
+
+    // Editing replaces the note; an empty one removes it.
+    CHECK(backup_set_note(&list[0], "100%", NULL) == DSAVE_OK);
+    n = backup_list(&lib, g, list, BACKUP_LIST_MAX);
+    CHECK(strcmp(list[0].note, "100%") == 0);
+    CHECK(backup_set_note(&list[0], "", NULL) == DSAVE_OK);
+    n = backup_list(&lib, g, list, BACKUP_LIST_MAX);
+    CHECK(list[0].note[0] == '\0' && list[0].has_meta);
+    char ini[DSAVE_PATH_MAX], line[256];
+    path_join(ini, sizeof(ini), list[0].dir, "backup.ini");
+    FILE *f = fopen(ini, "r");
+    bool note_line = false;
+    while (f && fgets(line, sizeof(line), f))
+        note_line |= strncmp(line, "note=", 5) == 0;
+    if (f)
+        fclose(f);
+    CHECK(!note_line);
+
+    // Long notes are cut, never in the middle of a UTF-8 character.
+    char longnote[64];
+    memset(longnote, 'a', sizeof(longnote));
+    memcpy(longnote + BACKUP_NOTE_MAX - 1, "\xc3\xa9", 2); // "é" across the limit
+    longnote[sizeof(longnote) - 1] = '\0';
+    CHECK(backup_set_note(&list[0], longnote, &u) == DSAVE_OK);
+    CHECK(strlen(u.note) == BACKUP_NOTE_MAX - 1);
+
+    // A kept backup can't be trashed until the mark is cleared.
+    CHECK(backup_set_keep(&list[0], true, &u) == DSAVE_OK && u.keep);
+    n = backup_list(&lib, g, list, BACKUP_LIST_MAX);
+    CHECK(list[0].keep);
+    CHECK(backup_trash(&lib, g, &list[0]) == DSAVE_ERR_KEPT);
+    CHECK(backup_list(&lib, g, list, BACKUP_LIST_MAX) == 1);
+
+    // Kept auto backups are never pruned and don't count towards the limit.
+    CHECK(library_set_keep_auto(&lib, 1));
+    Backup src = list[0];
+    for (int i = 0; i < 2; i++)
+    {
+        make_save("Game.sav", 64 * KB, 16 * KB, (uint8_t)(90 + i));
+        library_refresh_game(&lib, g);
+        Backup made;
+        CHECK(backup_restore(&lib, g, &src, &made) == DSAVE_OK);
+        if (i == 0)
+            CHECK(backup_set_keep(&made, true, NULL) == DSAVE_OK);
+    }
+    n = backup_list(&lib, g, list, BACKUP_LIST_MAX);
+    int autos = 0, kept_autos = 0;
+    for (int i = 0; i < n; i++)
+    {
+        autos += list[i].is_auto;
+        kept_autos += list[i].is_auto && list[i].keep;
+    }
+    CHECK(autos == 2 && kept_autos == 1);
+    make_save("Game.sav", 64 * KB, 16 * KB, 95);
+    library_refresh_game(&lib, g);
+    CHECK(backup_restore(&lib, g, &src, NULL) == DSAVE_OK);
+    n = backup_list(&lib, g, list, BACKUP_LIST_MAX);
+    autos = kept_autos = 0;
+    for (int i = 0; i < n; i++)
+    {
+        autos += list[i].is_auto;
+        kept_autos += list[i].is_auto && list[i].keep;
+    }
+    CHECK(autos == 2 && kept_autos == 1); // The kept one plus the newest
+
+    // Clearing the mark allows trashing again.
+    for (int i = 0; i < n; i++)
+    {
+        if (list[i].keep)
+        {
+            CHECK(backup_set_keep(&list[i], false, &u) == DSAVE_OK && !u.keep);
+            CHECK(backup_trash(&lib, g, &u) == DSAVE_OK);
+        }
+    }
+    CHECK(library_set_keep_auto(&lib, LIBRARY_KEEP_AUTO_DEFAULT));
+}
+
 // ---------------------------------------------------------------------------
 // Game card saves, against a fake save chip
 
@@ -1852,6 +1955,7 @@ int main(void)
     test_titles();
     test_import();
     test_prune_auto();
+    test_note_and_keep();
     test_icon();
     test_card_detect();
     test_card_write();

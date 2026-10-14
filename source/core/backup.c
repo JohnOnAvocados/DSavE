@@ -40,6 +40,7 @@ const char *dsave_result_str(DsaveResult r)
         case DSAVE_ERR_CARD_CHANGED:  return "The game card was removed or changed";
         case DSAVE_ERR_DAMAGED:       return "That save file is damaged";
         case DSAVE_ERR_CARD:          return "The game card's save chip did not answer";
+        case DSAVE_ERR_KEPT:          return "This backup is marked Keep";
     }
     return "Unknown error";
 }
@@ -131,9 +132,54 @@ static bool read_meta(Backup *b)
             b->size = strtol(val, NULL, 10), got_size = true;
         else if (strcmp(key, "crc32") == 0)
             b->crc32 = (uint32_t)strtoul(val, NULL, 16), got_crc = true;
+        else if (strcmp(key, "note") == 0)
+            snprintf(b->note, sizeof(b->note), "%s", val);
+        else if (strcmp(key, "keep") == 0)
+            b->keep = strcmp(val, "1") == 0;
     }
     fclose(f);
     return got_size && got_crc;
+}
+
+
+// Set key=value in a backup's backup.ini, or remove the key when value is
+// NULL. Other lines are kept. The new file is written beside the old one and
+// renamed over it, so a power cut leaves one or the other.
+static bool meta_set(const char *dir, const char *key, const char *value)
+{
+    char path[DSAVE_PATH_MAX], tmp[DSAVE_PATH_MAX];
+    if (!path_join(path, sizeof(path), dir, META_FILE) || !path_join(tmp, sizeof(tmp), dir, META_FILE ".tmp"))
+        return false;
+    FILE *out = fopen(tmp, "w");
+    if (!out)
+        return false;
+    bool ok = true;
+    size_t klen = strlen(key);
+    FILE *in = fopen(path, "r");
+    if (in)
+    {
+        char line[DSAVE_PATH_MAX + 16];
+        while (fgets(line, sizeof(line), in))
+        {
+            if (strncmp(line, key, klen) == 0 && line[klen] == '=')
+                continue;
+            if (fputs(line, out) < 0)
+                ok = false;
+        }
+        fclose(in);
+    }
+    if (value && fprintf(out, "%s=%s\n", key, value) < 0)
+        ok = false;
+    if (fclose(out) != 0)
+        ok = false;
+    // FAT can't rename over a file, so remove the old one first.
+    if (ok && file_exists(path) && remove(path) != 0)
+        ok = false;
+    if (ok && rename(tmp, path) != 0)
+        ok = false;
+    if (!ok)
+        remove(tmp);
+    return ok;
 }
 
 // ---------------------------------------------------------------------------
@@ -552,8 +598,48 @@ DsaveResult backup_rename(const Library *lib, const Game *game, const Backup *b,
     return rename(b->dir, target) == 0 ? DSAVE_OK : DSAVE_ERR_IO;
 }
 
+DsaveResult backup_set_note(const Backup *b, const char *note, Backup *out)
+{
+    if (!note)
+        note = "";
+    // Cut at BACKUP_NOTE_MAX, never in the middle of a UTF-8 character.
+    size_t n = strlen(note);
+    if (n > BACKUP_NOTE_MAX)
+    {
+        n = BACKUP_NOTE_MAX;
+        while (n > 0 && ((unsigned char)note[n] & 0xC0) == 0x80)
+            n--;
+    }
+    char clean[BACKUP_NOTE_MAX + 1];
+    for (size_t i = 0; i < n; i++)
+        clean[i] = (note[i] == '\r' || note[i] == '\n') ? ' ' : note[i];
+    clean[n] = '\0';
+    if (!meta_set(b->dir, "note", clean[0] ? clean : NULL))
+        return DSAVE_ERR_IO;
+    if (out)
+    {
+        *out = *b;
+        snprintf(out->note, sizeof(out->note), "%s", clean);
+    }
+    return DSAVE_OK;
+}
+
+DsaveResult backup_set_keep(const Backup *b, bool keep, Backup *out)
+{
+    if (!meta_set(b->dir, "keep", keep ? "1" : NULL))
+        return DSAVE_ERR_IO;
+    if (out)
+    {
+        *out = *b;
+        out->keep = keep;
+    }
+    return DSAVE_OK;
+}
+
 DsaveResult backup_trash(const Library *lib, const Game *game, const Backup *b)
 {
+    if (b->keep)
+        return DSAVE_ERR_KEPT;
     char trash[DSAVE_PATH_MAX], leaf[BACKUP_NAME_MAX + 8], target[DSAVE_PATH_MAX];
     if (!path_join(trash, sizeof(trash), lib->root, TRASH_DIR))
         return DSAVE_ERR_PATH;
@@ -650,14 +736,14 @@ int backup_prune_auto(const Library *lib, const Game *game, int keep, const char
     bool protected_seen = false;
     for (int i = 0; i < n; i++)
     {
-        if (list[i].is_auto && protect && strcmp(list[i].name, protect) == 0)
+        if (list[i].is_auto && !list[i].keep && protect && strcmp(list[i].name, protect) == 0)
             protected_seen = true;
     }
     if (protected_seen)
         autos = 1;
     for (int i = 0; i < n; i++) // Newest first
     {
-        if (!list[i].is_auto || (protected_seen && strcmp(list[i].name, protect) == 0) ||
+        if (!list[i].is_auto || list[i].keep || (protected_seen && strcmp(list[i].name, protect) == 0) ||
             ++autos <= keep)
             continue;
         if (backup_trash(lib, game, &list[i]) == DSAVE_OK)

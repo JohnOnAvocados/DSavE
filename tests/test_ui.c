@@ -367,15 +367,52 @@ static void test_main_flow(void)
     Backup *b = &app.backups[app.hist_sel];
     CHECK(strcmp(b->name, "Before boss") == 0);
 
-    // Export, then trash it.
+    // Add a note: it shows under the history list.
+    press(UI_KEY_Y);
+    press(UI_KEY_DOWN);
+    CHECK(app.more_sel == 1);
+    press(UI_KEY_A);
+    CHECK(app.modal == MODAL_KEYBOARD && app.kb_op == OP_NOTE && app.kb_text[0] == '\0');
+    type("all");
+    tap(3 + 2 * 25 + 30, 30 + 4 * 27 + 12); // Space
+    type("stars");
+    shot("09b_note");
+    press(UI_KEY_START);
+    CHECK(app.modal == MODAL_NONE && status_ok());
+    b = &app.backups[app.hist_sel];
+    CHECK(strcmp(b->name, "Before boss") == 0 && strcmp(b->note, "all stars") == 0);
+
+    // Keep it: trash is disabled until the mark is cleared.
     press(UI_KEY_Y);
     press(UI_KEY_DOWN);
     press(UI_KEY_DOWN);
+    CHECK(app.more_sel == 2);
+    press(UI_KEY_A);
+    CHECK(status_ok() && app.backups[app.hist_sel].keep);
+    shot("09c_kept");
+    press(UI_KEY_Y);
+    shot("09d_more_kept");
+    for (int i = 0; i < 3; i++)
+        press(UI_KEY_DOWN); // Skips the disabled trash item
+    CHECK(app.more_sel == 4);
+    press(UI_KEY_B);
+    CHECK(app.modal == MODAL_NONE);
+
+    // Export, then clear Keep and trash it.
+    press(UI_KEY_Y);
+    while (app.more_sel != 4)
+        press(UI_KEY_DOWN);
     press(UI_KEY_A);
     CHECK(status_ok() && strstr(app.status, "export"));
+    press(UI_KEY_Y);
+    while (app.more_sel != 2)
+        press(UI_KEY_DOWN);
+    press(UI_KEY_A);
+    CHECK(status_ok() && !app.backups[app.hist_sel].keep);
     int before = app.backup_count;
     press(UI_KEY_Y);
-    press(UI_KEY_DOWN);
+    while (app.more_sel != 3)
+        press(UI_KEY_DOWN);
     press(UI_KEY_A);
     CHECK(app.modal == MODAL_CONFIRM);
     hold(UI_KEY_A, 70);
@@ -507,9 +544,9 @@ static void test_import(void)
     // Y, "Import a save", lists the import folder.
     select_game("ATKE");
     press(UI_KEY_Y);
-    for (int i = 0; i < 6 && app.more_sel != 5; i++)
+    for (int i = 0; i < 8 && app.more_sel != 7; i++)
         press(UI_KEY_DOWN); // Skips the items that need a backup
-    CHECK(app.more_sel == 5);
+    CHECK(app.more_sel == 7);
     press(UI_KEY_A);
     CHECK(app.modal == MODAL_IMPORT && app.import_count == 3);
     shot("19_import");
@@ -536,7 +573,7 @@ static void test_import(void)
     // A .dsv named after Tetris goes into Tetris, though Kirby is selected.
     int kirby = app.game_sel;
     press(UI_KEY_Y);
-    for (int i = 0; i < 6 && app.more_sel != 5; i++)
+    for (int i = 0; i < 8 && app.more_sel != 7; i++)
         press(UI_KEY_DOWN);
     press(UI_KEY_A);
     CHECK(app.modal == MODAL_IMPORT && app.import_count == 3);
@@ -556,7 +593,7 @@ static void test_import(void)
     // Export it for DeSmuME: named after the ROM, footer added.
     press(UI_KEY_Y);
     CHECK(app.modal == MODAL_MORE);
-    for (int i = 0; i < 6 && app.more_sel != 3; i++)
+    for (int i = 0; i < 8 && app.more_sel != 5; i++)
         press(UI_KEY_DOWN);
     shot("21c_more_export");
     press(UI_KEY_A);

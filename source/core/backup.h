@@ -19,6 +19,7 @@
 
 #define BACKUP_NAME_MAX 40
 #define BACKUP_LIST_MAX 64
+#define BACKUP_NOTE_MAX 40
 
 typedef enum {
     DSAVE_OK = 0,
@@ -36,6 +37,7 @@ typedef enum {
     DSAVE_ERR_CARD_CHANGED,   // The game card was removed or swapped
     DSAVE_ERR_CARD,           // The game card's save chip did not respond
     DSAVE_ERR_DAMAGED,        // An import file's header or packed data is damaged
+    DSAVE_ERR_KEPT,           // The backup is marked Keep, so it can't be trashed
 } DsaveResult;
 
 const char *dsave_result_str(DsaveResult r);
@@ -51,6 +53,8 @@ typedef struct {
     bool has_meta;                // backup.ini was present and readable
     bool is_auto;                 // Made automatically before a restore
     bool compressed;              // Stored as <title>.sav.gz
+    char note[BACKUP_NOTE_MAX + 1]; // The user's note, "" for none
+    bool keep;                    // Never pruned or trashed while set
 } Backup;
 
 // Paths under <root>/_DSavE.
@@ -116,7 +120,17 @@ DsaveResult backup_set_compressed(const Backup *b, bool compress, Backup *out);
 DsaveResult backup_rename(const Library *lib, const Game *game, const Backup *b,
                           const char *new_name);
 
-// Move a backup to <root>/_DSavE/_TRASH_/ instead of deleting it.
+// Set or clear (note "" ) a backup's note, stored as note= in backup.ini.
+// Line breaks are dropped and the note is cut to BACKUP_NOTE_MAX bytes.
+// out, when given, receives the updated backup.
+DsaveResult backup_set_note(const Backup *b, const char *note, Backup *out);
+
+// Mark a backup Keep, or clear the mark (keep=1 in backup.ini). Kept
+// backups are skipped by backup_prune_auto and refused by backup_trash.
+DsaveResult backup_set_keep(const Backup *b, bool keep, Backup *out);
+
+// Move a backup to <root>/_DSavE/_TRASH_/ instead of deleting it. A kept
+// backup is refused with DSAVE_ERR_KEPT.
 DsaveResult backup_trash(const Library *lib, const Game *game, const Backup *b);
 
 typedef enum {
@@ -137,6 +151,7 @@ void backup_auto_name(char *out, size_t size);
 
 // Auto backups beyond the newest `keep` for this game move to the trash.
 // protect (a backup name, or NULL) is always kept and counts towards keep.
+// Backups marked Keep are never moved and don't count.
 // Restores and copies call this after making their safety copy, with
 // lib->keep_auto. Returns how many were moved.
 int backup_prune_auto(const Library *lib, const Game *game, int keep, const char *protect);
