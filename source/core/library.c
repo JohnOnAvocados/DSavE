@@ -176,6 +176,9 @@ int library_scan(Library *lib, const char *root)
     char settings[DSAVE_PATH_MAX];
     kernels_settings_path(root, settings, sizeof(settings));
     lib->compress = ini_get_int(settings, "dsave", "compress", 0) != 0;
+    lib->keep_auto = ini_get_int(settings, "dsave", "keep_auto", LIBRARY_KEEP_AUTO_DEFAULT);
+    if (lib->keep_auto < 0)
+        lib->keep_auto = 0;
 
     scan_dir(lib, root, 0);
     qsort(lib->games, (size_t)lib->count, sizeof(Game), compare_games);
@@ -202,4 +205,13 @@ bool library_set_compress(Library *lib, bool on)
     path_dirname(dir, sizeof(dir), settings);
     lib->compress = on;
     return mkdir_p(dir) && ini_set_int(settings, "dsave", "compress", on ? 1 : 0);
+}
+
+bool library_set_keep_auto(Library *lib, int keep)
+{
+    char settings[DSAVE_PATH_MAX], dir[DSAVE_PATH_MAX];
+    kernels_settings_path(lib->root, settings, sizeof(settings));
+    path_dirname(dir, sizeof(dir), settings);
+    lib->keep_auto = keep < 0 ? 0 : keep;
+    return mkdir_p(dir) && ini_set_int(settings, "dsave", "keep_auto", lib->keep_auto);
 }

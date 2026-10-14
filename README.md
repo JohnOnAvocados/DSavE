@@ -42,14 +42,22 @@ saves without a PC.
   _DSavE/saves/<GAMECODE> <title>/<backup name>/<title>.sav
                                                /backup.ini   (size, CRC-32, date)
   _DSavE/export/   exported copies
+  _DSavE/import/   .sav files to import as backups
   _DSavE/_TRASH_/  deleted backups (nothing is ever hard-deleted)
   ```
+
+  Games are named by their banner title in English, French, German, Italian,
+  Spanish or Japanese, whichever comes first that the fonts can draw. A game
+  whose banner is Japanese only is named by its ROM file name instead.
 
 - **Restores safely.**
   1. The backup's size and CRC-32 are checked against `backup.ini`, and its
      game code must match the game. A corrupt, truncated or wrong-game
      backup is refused before anything is written.
-  2. The current save is backed up automatically (`auto_<timestamp>`).
+  2. The current save is backed up automatically (`auto_<timestamp>`). Only
+     the last 10 auto backups of each game are kept, and older ones go to
+     `_TRASH_`. Change the number, or keep them all, with *Keep auto backups*
+     in the menu.
   3. The save is overwritten in place, so flashcarts that need a contiguous,
      pre-allocated save file (Wood R4) keep working. If the kernel padded
      the save (Pico and TWiLight pad to 512 KB), the padding is kept.
@@ -67,6 +75,13 @@ saves without a PC.
   to a few KB. Saves over 1 MB stay uncompressed, because the DS Lite has
   only 4 MB of RAM.
 
+- **Imports saves from a PC, an emulator or Checkpoint.** Put the `.sav`
+  (or `.dsv`, or `.sav.gz`) in `_DSavE/import/`, choose the game, then
+  *Import a .sav* under Y. The file becomes a backup named `import_<file>`,
+  which you can then restore. DeSmuME's `.dsv` footer is removed. DSavE
+  can't tell which game a raw `.sav` belongs to, so check you picked the right
+  one. no$gba saves are not supported yet.
+
 ## Controls
 
 Everything works with the buttons or the stylus.
@@ -81,8 +96,8 @@ Everything works with the buttons or the stylus.
 | | A | **Backup** the save now (named by date and time) |
 | | B | **Restore** the chosen backup (hold A to confirm) |
 | | X | **Compress** or decompress the chosen backup |
-| | Y | **Rename/Delete**: rename, move to trash, export a `.sav` for PC, or back up with a name |
-| | START | Menu: active kernel, compression, rescan, about |
+| | Y | **Rename/Delete**: rename, move to trash, export a `.sav` for PC, back up with a name, or import a `.sav` |
+| | START | Menu: active kernel, compression, auto backups to keep, rescan, about |
 | | SELECT | Copies of this save across kernels, and TWiLight slots |
 | Copies | A on a copy | Copy the current save there (hold A) |
 | | A on a slot | Make TWiLight load that slot |

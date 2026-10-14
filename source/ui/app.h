@@ -59,6 +59,7 @@ typedef enum {
     MODAL_MORE,     // Rename / Delete / Export popup
     MODAL_KEYBOARD,
     MODAL_ABOUT,
+    MODAL_IMPORT,   // Files in _DSavE/import
 } UiModal;
 
 // Work that touches the SD card. It is queued, the UI draws one frame saying
@@ -80,6 +81,7 @@ typedef enum {
     OP_COPY_ALL,
     OP_BACKUP_COPY,   // Back up the selected copy instead of the primary save
     OP_USE_SLOT,
+    OP_IMPORT,
 } UiOp;
 
 typedef enum {
@@ -115,6 +117,9 @@ typedef struct {
     UiOp dlg_op;
 
     int menu_sel, more_sel;
+
+    ImportFile imports[IMPORT_LIST_MAX];
+    int import_count, import_sel, import_scroll;
 
     char kb_text[BACKUP_NAME_MAX + 1];
     int kb_row, kb_col;

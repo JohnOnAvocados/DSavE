@@ -7,6 +7,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <dirent.h>
 
 #include "../source/core/backup.h"
 #include "../source/core/ini.h"
@@ -423,7 +424,7 @@ static void test_scan(void)
     library_scan(&lib, root);
     CHECK(lib.kernels.active == KERNEL_WOOD);
     CHECK(lib.count == 3); // homebrew and _nds skipped
-    CHECK(strcmp(lib.games[0].title, "CASTLEVANIA1") == 0);
+    CHECK(strcmp(lib.games[0].title, "Castlevania_DoS") == 0); // No banner: file name
     CHECK(strcmp(lib.games[1].title, "CHRONO TRIGGER") == 0);
     CHECK(strcmp(lib.games[2].title, "POKEMON SS") == 0);
 
@@ -1010,6 +1011,224 @@ static void test_compression(void)
     CHECK(backup_set_compressed(&b, true, NULL) == DSAVE_ERR_UNSUPPORTED);
 }
 
+// Writes a ROM whose banner titles are UTF-16 code units, one array per
+// language slot (JP, EN, FR, DE, IT, ES); NULL leaves a slot empty.
+static void make_rom_titles(const char *rel, const char *code, const uint16_t *const titles[6])
+{
+    char path[DSAVE_PATH_MAX], dir[DSAVE_PATH_MAX];
+    p(path, rel);
+    path_dirname(dir, sizeof(dir), path);
+    mkdir_p(dir);
+    static uint8_t rom[0x200 + 0xA00];
+    memset(rom, 0, sizeof(rom));
+    memcpy(rom, "JPGAME", 6);
+    memcpy(rom + 0x0C, code, 4);
+    rom[0x69] = 0x02;
+    for (int l = 0; l < 6; l++)
+    {
+        for (int i = 0; titles[l] && titles[l][i]; i++)
+        {
+            rom[0x200 + 0x240 + l * 0x100 + i * 2] = (uint8_t)titles[l][i];
+            rom[0x200 + 0x240 + l * 0x100 + i * 2 + 1] = (uint8_t)(titles[l][i] >> 8);
+        }
+    }
+    FILE *f = fopen(path, "wb");
+    fwrite(rom, 1, sizeof(rom), f);
+    fclose(f);
+}
+
+static void test_titles(void)
+{
+    static const uint16_t jp[] = { 0x30DD, 0x30B1, 0x30E2, 0x30F3, 0 }; // ポケモン
+    static const uint16_t fr[] = { 'P', 'o', 'k', 0xE9, 'm', 'o', 'n', 0 };
+    static const uint16_t quote[] = { 'K', 'i', 'r', 'b', 'y', 0x2019, 's', 0 };
+
+    new_card();
+    make_dir("_pico");
+    // Japanese in every slot: the file name is used.
+    const uint16_t *const all_jp[6] = { jp, jp, jp, jp, jp, jp };
+    make_rom_titles("Pokemon Diamond (Japan).nds", "ADAJ", all_jp);
+    // Japanese English slot, French slot in Latin: French wins.
+    const uint16_t *const jp_fr[6] = { jp, jp, fr, NULL, NULL, NULL };
+    make_rom_titles("x.nds", "IPKF", jp_fr);
+    // Curly apostrophes are drawable.
+    const uint16_t *const en_q[6] = { NULL, quote, NULL, NULL, NULL, NULL };
+    make_rom_titles("k.nds", "AKBE", en_q);
+    // Japanese file name and banner: the header title.
+    make_rom_titles("\xe3\x83\x9d.nds", "AJPJ", all_jp);
+    library_scan(&lib, root);
+
+    Game *g = find_game("ADAJ");
+    CHECK(g && strcmp(g->title, "Pokemon Diamond (Japan)") == 0);
+    CHECK(g && !g->info.banner_latin);
+    g = find_game("IPKF");
+    CHECK(g && strcmp(g->title, "Pok\xc3\xa9mon") == 0 && g->info.banner_latin);
+    g = find_game("AKBE");
+    CHECK(g && strcmp(g->title, "Kirby\xe2\x80\x99s") == 0);
+    g = find_game("AJPJ");
+    CHECK(g && strcmp(g->title, "JPGAME") == 0);
+    CHECK(text_is_latin("Caf\xc3\xa9 \xe2\x80\x94 ok") && !text_is_latin("\xe3\x83\x9d"));
+}
+
+static void test_import(void)
+{
+    new_card();
+    make_dir("_pico");
+    make_rom("Game.nds", "GAME", "ABCE", NULL);
+    library_scan(&lib, root);
+    Game *g = find_game("ABCE");
+    if (!g)
+        return;
+
+    ImportFile files[IMPORT_LIST_MAX];
+    CHECK(backup_import_list(&lib, files, IMPORT_LIST_MAX) == 0);
+    char dir[DSAVE_PATH_MAX];
+    p(dir, "_DSavE/import");
+    CHECK(dir_exists(dir)); // Created for the user to fill
+
+    // A raw save, a DeSmuME .dsv with its footer, an odd size, a gz,
+    // a no$gba save and an unrelated file.
+    make_save("_DSavE/import/From PC.sav", 64 * KB, 10 * KB, 61);
+    uint32_t raw = crc_of_rel("_DSavE/import/From PC.sav");
+    make_save("_DSavE/import/emu.dsv", 8 * KB, 8 * KB, 62);
+    uint32_t dsv_data = crc_of_rel("_DSavE/import/emu.dsv");
+    {
+        char path[DSAVE_PATH_MAX];
+        p(path, "_DSavE/import/emu.dsv");
+        FILE *f = fopen(path, "ab");
+        fputs("|<--Snip above here to create a raw sav by excluding this DeSmuME savedata footer:", f);
+        uint8_t fields[24] = { 0 };
+        fwrite(fields, 1, sizeof(fields), f);
+        fputs("|-DESMUME SAVE-|", f);
+        fclose(f);
+    }
+    make_file("_DSavE/import/odd.sav", 1000, 63);
+    make_save("_DSavE/import/packed.sav", 512 * KB, 4 * KB, 64);
+    uint32_t packed = crc_of_rel("_DSavE/import/packed.sav");
+    {
+        char cmd[DSAVE_PATH_MAX + 32], path[DSAVE_PATH_MAX];
+        p(path, "_DSavE/import/packed.sav");
+        snprintf(cmd, sizeof(cmd), "gzip '%s'", path);
+        CHECK(system(cmd) == 0);
+        p(path, "_DSavE/import/nocash.sav");
+        FILE *f = fopen(path, "wb");
+        fputs("NocashGbaBackupMediaSavDataFile", f);
+        for (int i = 0; i < 4096; i++)
+            fputc(0, f);
+        fclose(f);
+    }
+    make_text("_DSavE/import/readme.txt", "hi");
+
+    int n = backup_import_list(&lib, files, IMPORT_LIST_MAX);
+    CHECK(n == 5); // Not the .txt
+    CHECK(n == 5 && strcmp(files[0].name, "emu.dsv") == 0 && files[0].size == 8 * KB && files[0].valid);
+    CHECK(n == 5 && strcmp(files[1].name, "From PC.sav") == 0 && files[1].valid);
+    CHECK(n == 5 && strcmp(files[2].name, "nocash.sav") == 0 && !files[2].valid);
+    CHECK(n == 5 && strcmp(files[3].name, "odd.sav") == 0 && !files[3].valid);
+    CHECK(n == 5 && strcmp(files[4].name, "packed.sav.gz") == 0 && files[4].size == 512 * KB);
+    if (n != 5)
+        return;
+
+    Backup b;
+    CHECK(backup_import(&lib, g, files[1].path, &b) == DSAVE_OK);
+    CHECK(strcmp(b.name, "import_From PC") == 0 && b.crc32 == raw && b.size == 64 * KB);
+    CHECK(file_exists(files[1].path)); // Left in place
+    CHECK(backup_import(&lib, g, files[0].path, &b) == DSAVE_OK);
+    CHECK(b.size == 8 * KB && b.crc32 == dsv_data && backup_validate(&b) == DSAVE_OK);
+    char tmp[DSAVE_PATH_MAX];
+    p(tmp, "_DSavE/.import.tmp");
+    CHECK(!file_exists(tmp));
+    CHECK(backup_import(&lib, g, files[4].path, &b) == DSAVE_OK);
+    CHECK(strcmp(b.name, "import_packed") == 0 && b.crc32 == packed);
+    CHECK(backup_import(&lib, g, files[2].path, &b) == DSAVE_ERR_UNSUPPORTED);
+    CHECK(backup_import(&lib, g, files[3].path, &b) == DSAVE_ERR_BAD_SIZE);
+
+    // backup.ini names the original file, and the backup restores.
+    Backup list[BACKUP_LIST_MAX];
+    CHECK(backup_list(&lib, g, list, BACKUP_LIST_MAX) == 3);
+    char ini[DSAVE_PATH_MAX], source[DSAVE_PATH_MAX] = "";
+    path_join(ini, sizeof(ini), list[0].dir, "backup.ini");
+    FILE *mf = fopen(ini, "r");
+    char line[DSAVE_PATH_MAX + 16];
+    while (mf && fgets(line, sizeof(line), mf))
+    {
+        if (strncmp(line, "source=", 7) == 0)
+            snprintf(source, sizeof(source), "%s", line + 7);
+    }
+    if (mf)
+        fclose(mf);
+    CHECK(strstr(source, "_DSavE/import/") != NULL);
+    for (int i = 0; i < 3; i++)
+    {
+        if (strcmp(list[i].name, "import_emu") == 0)
+        {
+            CHECK(backup_restore(&lib, g, &list[i], NULL) == DSAVE_OK);
+            CHECK(crc_of(g->save_path) == dsv_data && g->save_size == 8 * KB);
+        }
+    }
+}
+
+static void test_prune_auto(void)
+{
+    new_card();
+    make_dir("_pico");
+    make_rom("Game.nds", "GAME", "ABCE", NULL);
+    make_save("Game.sav", 64 * KB, 16 * KB, 71);
+    library_scan(&lib, root);
+    CHECK(lib.keep_auto == LIBRARY_KEEP_AUTO_DEFAULT);
+    CHECK(library_set_keep_auto(&lib, 2));
+    library_scan(&lib, root);
+    CHECK(lib.keep_auto == 2); // Remembered
+    Game *g = find_game("ABCE");
+    if (!g)
+        return;
+
+    Backup keep;
+    CHECK(backup_create(&lib, g, "mine", false, &keep) == DSAVE_OK);
+    for (int i = 0; i < 4; i++)
+    {
+        make_save("Game.sav", 64 * KB, 16 * KB, (uint8_t)(80 + i));
+        library_refresh_game(&lib, g);
+        CHECK(backup_restore(&lib, g, &keep, NULL) == DSAVE_OK);
+    }
+    Backup list[BACKUP_LIST_MAX];
+    int n = backup_list(&lib, g, list, BACKUP_LIST_MAX);
+    int autos = 0;
+    for (int i = 0; i < n; i++)
+        autos += list[i].is_auto;
+    CHECK(n == 3 && autos == 2); // "mine" is never pruned
+    // The two newest autos hold the last two saves that were replaced.
+    // Each auto holds the save from before that restore: seeds 82 and 83.
+    bool seen82 = false, seen83 = false;
+    for (int i = 0; i < n; i++)
+    {
+        if (!list[i].is_auto)
+            continue;
+        char want[DSAVE_PATH_MAX];
+        make_save("probe.sav", 64 * KB, 16 * KB, 82);
+        p(want, "probe.sav");
+        seen82 |= list[i].crc32 == crc_of(want);
+        make_save("probe.sav", 64 * KB, 16 * KB, 83);
+        seen83 |= list[i].crc32 == crc_of(want);
+    }
+    CHECK(seen82 && seen83);
+    // Pruned ones are in the trash, not deleted.
+    char trash[DSAVE_PATH_MAX];
+    p(trash, "_DSavE/_TRASH_");
+    DIR *d = opendir(trash);
+    int in_trash = 0;
+    struct dirent *e;
+    while (d && (e = readdir(d)) != NULL)
+        in_trash += strncmp(e->d_name, "ABCE_auto_", 10) == 0;
+    if (d)
+        closedir(d);
+    CHECK(in_trash == 2);
+
+    // 0 keeps everything.
+    CHECK(library_set_keep_auto(&lib, 0));
+    CHECK(backup_prune_auto(&lib, g, 0, NULL) == 0);
+}
+
 int main(void)
 {
     char tmpl[] = "/tmp/dsave-test-XXXXXX";
@@ -1035,6 +1254,9 @@ int main(void)
     test_sync_copy_and_all();
     test_slots();
     test_compression();
+    test_titles();
+    test_import();
+    test_prune_auto();
 
     library_free(&lib);
     remove_tree(tmpl);
