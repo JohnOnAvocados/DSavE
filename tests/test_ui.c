@@ -211,6 +211,14 @@ static void select_game(const char *code)
     CHECK(!"game not found");
 }
 
+static uint32_t crc_of(const char *path)
+{
+    uint32_t crc = 0;
+    long size;
+    file_crc32(path, &crc, &size);
+    return crc;
+}
+
 static bool status_ok(void)
 {
     return app.status_kind == STATUS_OK;
@@ -324,6 +332,13 @@ static void test_main_flow(void)
     CHECK(app.backup_disk[app.hist_sel] < app.backups[app.hist_sel].size);
     shot("04_history");
 
+    // Play a little, so the restore changes the save.
+    FILE *played = fopen(game()->save_path, "r+b");
+    CHECK(played && fputc(0x42, played) == 0x42);
+    if (played)
+        fclose(played);
+    uint32_t played_crc = crc_of(game()->save_path);
+
     // B: restore needs A held; a short press does nothing.
     press(UI_KEY_B);
     CHECK(app.modal == MODAL_CONFIRM && app.dlg_hold);
@@ -417,6 +432,46 @@ static void test_main_flow(void)
     CHECK(app.modal == MODAL_CONFIRM);
     hold(UI_KEY_A, 70);
     CHECK(status_ok() && app.backup_count == before - 1);
+
+    // The activity history lists all of that, newest first, and undoes the
+    // restore: the save goes back to what it was before.
+    char save[DSAVE_PATH_MAX];
+    snprintf(save, sizeof(save), "%s", game()->save_path);
+    uint32_t restored_crc = crc_of(save);
+    press(UI_KEY_START);
+    while (app.menu_sel != MENU_HISTORY)
+        press(UI_KEY_DOWN);
+    press(UI_KEY_A);
+    CHECK(app.modal == MODAL_HISTORY && app.act_count >= 5);
+    CHECK(app.acts[0].kind == ACT_TRASH && app.acts[1].kind == ACT_EXPORT);
+    shot("09e_history");
+    int r = -1;
+    for (int i = 0; i < app.act_count && r < 0; i++)
+        r = app.acts[i].kind == ACT_RESTORE ? i : -1;
+    CHECK(r >= 0);
+    press(UI_KEY_A); // The trash entry can't be undone
+    CHECK(app.modal == MODAL_HISTORY);
+    while (app.act_sel != r)
+        press(UI_KEY_DOWN);
+    shot("09f_history_restore");
+    press(UI_KEY_A);
+    CHECK(app.modal == MODAL_CONFIRM && app.dlg_op == OP_UNDO);
+    hold(UI_KEY_A, 70);
+    CHECK(app.modal == MODAL_NONE && status_ok());
+    CHECK(crc_of(save) != restored_crc && crc_of(save) == played_crc);
+    char logp[DSAVE_PATH_MAX];
+    p(logp, "_DSavE/log.txt");
+    CHECK(file_size(logp) > 0);
+
+    // B goes back to the menu.
+    press(UI_KEY_START);
+    while (app.menu_sel != MENU_HISTORY)
+        press(UI_KEY_DOWN);
+    press(UI_KEY_A);
+    CHECK(app.acts[0].kind == ACT_UNDO);
+    press(UI_KEY_B);
+    CHECK(app.modal == MODAL_MENU);
+    press(UI_KEY_B);
 }
 
 static void test_copies(void)
@@ -506,7 +561,7 @@ static void test_empty_card(void)
     CHECK(app.screen == SCREEN_MAIN && app.modal == MODAL_NONE);
     shot("16_empty");
     press(UI_KEY_START);
-    for (int i = 0; i < 4; i++)
+    while (app.menu_sel != MENU_ABOUT)
         press(UI_KEY_DOWN);
     press(UI_KEY_A);
     CHECK(app.modal == MODAL_ABOUT);

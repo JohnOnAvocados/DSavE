@@ -48,9 +48,9 @@
 #define HIST_ROWS 4
 #define STATUS_Y 178
 
-#define MENU_ITEMS 5
 #define MENU_Y 28
-#define MENU_PITCH 24
+#define MENU_PITCH 20
+
 #define MORE_ITEMS 8
 #define MORE_BOX_Y 4
 #define MORE_BOX_H 184
@@ -60,6 +60,8 @@
 // "More" popup items
 enum { MORE_RENAME, MORE_NOTE, MORE_KEEP, MORE_TRASH, MORE_EXPORT_SAV, MORE_EXPORT_DSV, MORE_NEW, MORE_IMPORT };
 #define IMPORT_ROWS 5
+#define ACT_ROW_H 30
+#define ACT_ROWS 4
 
 // Choices for "Keep auto backups"; 0 keeps all.
 static const int keep_choices[] = { 5, 10, 20, 50, 0 };
@@ -484,6 +486,48 @@ static void finish_backup(App *app, DsaveResult r, const Backup *made)
         set_status(app, STATUS_OK, "Backed up: %s", label);
 }
 
+// Record a finished action in _DSavE/log.txt (see activity.h).
+static void log_act(App *app, ActivityKind kind, const Game *g, const Backup *b, const char *safety,
+                    const char *path)
+{
+    activity_log(app->lib, kind, g, b ? b->name : "", b ? b->crc32 : 0, safety ? safety : "", path);
+}
+
+static void open_history(App *app)
+{
+    app->act_count = activity_list(app->lib, app->acts, ACTIVITY_LIST_MAX);
+    app->act_sel = app->act_scroll = 0;
+    app->modal = MODAL_HISTORY;
+    app->dirty = true;
+}
+
+static const Activity *cur_activity(const App *app)
+{
+    return app->act_sel < app->act_count ? &app->acts[app->act_sel] : NULL;
+}
+
+static void history_choose(App *app)
+{
+    const Activity *a = cur_activity(app);
+    if (!a)
+        return;
+    if (a->card && (a->kind == ACT_RESTORE))
+    {
+        set_status(app, STATUS_ERROR, "Undo is for SD card saves. Restore the card's Auto backup instead");
+        return;
+    }
+    if (!activity_can_undo(a))
+    {
+        set_status(app, STATUS_HINT, "Only restores and copies can be undone");
+        return;
+    }
+    char t[48];
+    pretty_time(a->time, t, sizeof(t));
+    confirm(app, OP_UNDO, true, "Undo this restore?",
+            "%s goes back to the save it had before %s. What it holds now is kept as an Auto backup.",
+            a->title, t);
+}
+
 static void run_op(App *app, UiOp op)
 {
     Library *lib = app->lib;
@@ -541,6 +585,8 @@ static void run_op(App *app, UiOp op)
                                        : backup_create(lib, g, app->kb_text, op == OP_BACKUP_BLANK, &made);
             if (r == DSAVE_ERR_CARD_CHANGED)
                 check_card(app);
+            if (r == DSAVE_OK)
+                log_act(app, ACT_BACKUP, g, &made, NULL, g->save_path);
             finish_backup(app, r, &made);
             break;
         }
@@ -558,6 +604,7 @@ static void run_op(App *app, UiOp op)
             app->backups_game = -1;
             if (r == DSAVE_OK)
             {
+                log_act(app, ACT_BACKUP, g, &made, NULL, src);
                 char label[64];
                 backup_label(&made, label, sizeof(label));
                 set_status(app, STATUS_OK, "Backed up this copy: %s", label);
@@ -577,6 +624,10 @@ static void run_op(App *app, UiOp op)
                                      : backup_restore(lib, g, b, &safety);
                 if (r == DSAVE_ERR_CARD_CHANGED || (card && r == DSAVE_ERR_ROLLBACK_FAILED))
                     check_card(app);
+                // A restore that couldn't be rolled back is logged too, so
+                // its undo puts the old save back.
+                if (r == DSAVE_OK || (r == DSAVE_ERR_ROLLBACK_FAILED && safety.name[0]))
+                    log_act(app, ACT_RESTORE, g, b, safety.name, g->save_path);
                 load_backups(app);
                 select_backup_named(app, msg);
                 if (r == DSAVE_ERR_UNSUPPORTED && card)
@@ -631,7 +682,12 @@ static void run_op(App *app, UiOp op)
         case OP_TRASH:
             if (!g || !b)
                 break;
-            result_status(app, backup_trash(lib, g, b), "Moved to _DSavE/_TRASH_");
+            {
+                DsaveResult r = backup_trash(lib, g, b);
+                if (r == DSAVE_OK)
+                    log_act(app, ACT_TRASH, g, b, NULL, "");
+                result_status(app, r, "Moved to _DSavE/_TRASH_");
+            }
             load_backups(app);
             break;
 
@@ -670,6 +726,8 @@ static void run_op(App *app, UiOp op)
                 char path[DSAVE_PATH_MAX], base[DSAVE_PATH_MAX];
                 DsaveResult r = backup_export(lib, g, b, op == OP_EXPORT_DSV ? EXPORT_DSV : EXPORT_SAV, path,
                                               sizeof(path));
+                if (r == DSAVE_OK)
+                    log_act(app, ACT_EXPORT, g, b, NULL, path);
                 path_basename(base, sizeof(base), path);
                 snprintf(msg, sizeof(msg), "Exported to _DSavE/export/%s", base);
                 result_status(app, r, msg);
@@ -696,6 +754,8 @@ static void run_op(App *app, UiOp op)
                 break;
             {
                 DsaveResult r = sync_copy(lib, g, g->primary, app->copy_sel, &safety);
+                if (r == DSAVE_OK)
+                    log_act(app, ACT_COPY, g, NULL, safety.name, g->locs[app->copy_sel].path);
                 app->backups_game = -1;
                 load_copies(app);
                 result_status(app, r, safety.name[0] ? "Copied. The old file was kept as an Auto backup"
@@ -724,6 +784,7 @@ static void run_op(App *app, UiOp op)
                 DsaveResult r = backup_import(lib, into, app->imports[app->import_sel].path, &made);
                 if (r == DSAVE_OK)
                 {
+                    log_act(app, ACT_IMPORT, into, &made, NULL, app->imports[app->import_sel].path);
                     // Show the game it went into, which may not be the one
                     // that was selected.
                     app->game_sel = app->import_game;
@@ -736,6 +797,25 @@ static void run_op(App *app, UiOp op)
                     result_status(app, r, "");
             }
             break;
+
+        case OP_UNDO:
+        {
+            const Activity *a = cur_activity(app);
+            if (!a)
+                break;
+            int gi = -1;
+            DsaveResult r = activity_undo(lib, a, &gi, &safety);
+            if (gi >= 0)
+            {
+                app->game_sel = gi;
+                keep_visible(app->game_sel, &app->game_scroll, GAME_ROWS, lib->count);
+            }
+            app->backups_game = -1;
+            load_backups(app);
+            app->modal = MODAL_NONE;
+            result_status(app, r, "Undone. The save it replaced is an Auto backup");
+            break;
+        }
 
         case OP_USE_SLOT:
             if (!g || app->copy_sel < g->loc_count)
@@ -962,22 +1042,25 @@ static void menu_activate(App *app, int item)
 {
     switch (item)
     {
-        case 0:
+        case MENU_KERNEL:
             cycle_kernel(app, 1);
             break;
-        case 1:
+        case MENU_COMPRESS:
             if (library_set_compress(app->lib, !app->lib->compress))
                 set_status(app, STATUS_OK, "New backups are %s", app->lib->compress ? "compressed" : "plain .sav files");
             else
                 set_status(app, STATUS_ERROR, "Could not save the setting");
             break;
-        case 2:
+        case MENU_KEEP_AUTO:
             cycle_keep(app, 1);
             break;
-        case 3:
+        case MENU_HISTORY:
+            open_history(app);
+            break;
+        case MENU_RESCAN:
             queue(app, OP_SCAN, "Scanning the SD card");
             break;
-        case 4:
+        case MENU_ABOUT:
             app->modal = MODAL_ABOUT;
             break;
     }
@@ -1188,6 +1271,13 @@ static void layout_bottom(App *app, Ctls *ctls)
             add_ctl(ctls, 4, BAR_Y + 23, BTN_W, BTN_H, ID_DLG_OK);
             add_ctl(ctls, 130, BAR_Y + 23, BTN_W, BTN_H, ID_DLG_CANCEL);
             return;
+        case MODAL_HISTORY:
+            add_ctl(ctls, 4, 3, pill_width("B", "Back"), 16, ID_BACK);
+            for (int i = 0; i < ACT_ROWS && app->act_scroll + i < app->act_count; i++)
+                add_ctl(ctls, 0, LIST_Y + i * ACT_ROW_H, SCREEN_W, ACT_ROW_H, ID_ITEM + i);
+            add_ctl(ctls, 4, BAR_Y + 23, BTN_W, BTN_H, ID_DLG_OK);
+            add_ctl(ctls, 130, BAR_Y + 23, BTN_W, BTN_H, ID_DLG_CANCEL);
+            return;
         case MODAL_KEYBOARD:
             add_ctl(ctls, 200, 5, 52, 20, ID_KB_CANCEL);
             for (int r = 0; r < 4; r++)
@@ -1251,6 +1341,15 @@ static void activate(App *app, int id)
             app->more_sel = item;
             more_activate(app, item);
         }
+        else if (app->modal == MODAL_HISTORY)
+        {
+            // First tap selects, a second tap offers the undo.
+            int idx = clampi(app->act_scroll + item, 0, app->act_count - 1);
+            if (idx == app->act_sel)
+                history_choose(app);
+            app->act_sel = idx;
+            app->dirty = true;
+        }
         else if (app->modal == MODAL_IMPORT)
         {
             // First tap selects, a second tap imports.
@@ -1277,7 +1376,9 @@ static void activate(App *app, int id)
         case ID_MENU: act_menu(app); break;
         case ID_COPIES: act_open_copies(app); break;
         case ID_BACK:
-            if (app->modal == MODAL_MENU || app->modal == MODAL_IMPORT)
+            if (app->modal == MODAL_HISTORY)
+                app->modal = MODAL_MENU;
+            else if (app->modal == MODAL_MENU || app->modal == MODAL_IMPORT)
                 app->modal = MODAL_NONE;
             else
                 act_close_copies(app);
@@ -1302,13 +1403,15 @@ static void activate(App *app, int id)
         case ID_DLG_OK:
             if (app->modal == MODAL_IMPORT)
                 import_choose(app);
+            else if (app->modal == MODAL_HISTORY)
+                history_choose(app);
             else if (!app->dlg_hold)
                 dialog_accept(app);
             break;
         case ID_DLG_CANCEL:
         case ID_KB_CANCEL:
         case ID_OUTSIDE:
-            app->modal = app->modal == MODAL_ABOUT ? MODAL_MENU : MODAL_NONE;
+            app->modal = app->modal == MODAL_ABOUT || app->modal == MODAL_HISTORY ? MODAL_MENU : MODAL_NONE;
             app->dirty = true;
             break;
     }
@@ -1489,11 +1592,11 @@ static void input_modal(App *app, const UiInput *in)
                 app->menu_sel = (app->menu_sel + 1) % MENU_ITEMS;
             if (k & (UI_KEY_UP | UI_KEY_DOWN))
                 app->dirty = true;
-            if (app->menu_sel == 0 && (k & (UI_KEY_LEFT | UI_KEY_RIGHT)))
+            if (app->menu_sel == MENU_KERNEL && (k & (UI_KEY_LEFT | UI_KEY_RIGHT)))
                 cycle_kernel(app, (k & UI_KEY_LEFT) ? -1 : 1);
-            else if (app->menu_sel == 1 && (k & (UI_KEY_LEFT | UI_KEY_RIGHT)))
-                menu_activate(app, 1);
-            else if (app->menu_sel == 2 && (k & (UI_KEY_LEFT | UI_KEY_RIGHT)))
+            else if (app->menu_sel == MENU_COMPRESS && (k & (UI_KEY_LEFT | UI_KEY_RIGHT)))
+                menu_activate(app, MENU_COMPRESS);
+            else if (app->menu_sel == MENU_KEEP_AUTO && (k & (UI_KEY_LEFT | UI_KEY_RIGHT)))
                 cycle_keep(app, (k & UI_KEY_LEFT) ? -1 : 1);
             else if (in->down & UI_KEY_A)
                 menu_activate(app, app->menu_sel);
@@ -1566,6 +1669,28 @@ static void input_modal(App *app, const UiInput *in)
                 app->dirty = true;
             }
             break;
+
+        case MODAL_HISTORY:
+        {
+            int old = app->act_sel;
+            if (app->act_count && (k & UI_KEY_UP))
+                app->act_sel = (app->act_sel + app->act_count - 1) % app->act_count;
+            if (app->act_count && (k & UI_KEY_DOWN))
+                app->act_sel = (app->act_sel + 1) % app->act_count;
+            if (app->act_sel != old)
+            {
+                keep_visible(app->act_sel, &app->act_scroll, ACT_ROWS, app->act_count);
+                app->dirty = true;
+            }
+            if (in->down & UI_KEY_A)
+                history_choose(app);
+            else if (in->down & UI_KEY_B)
+            {
+                app->modal = MODAL_MENU;
+                app->dirty = true;
+            }
+            break;
+        }
 
         case MODAL_IMPORT:
         {
@@ -2255,8 +2380,11 @@ static void draw_menu(Canvas *c, const App *app, const Ctls *ctls)
     draw_pill(c, app, find_ctl(ctls, ID_BACK), "B", "Close");
     gfx_text_right(c, &font_bold, SCREEN_W - 8, 3, "Menu", C_TEXT);
 
-    static const char *const items[MENU_ITEMS] = { "Kernel", "Compress new backups", "Keep auto backups",
-                                                   "Rescan SD card", "About DSavE" };
+    static const char *const items[MENU_ITEMS] = {
+        [MENU_KERNEL] = "Kernel",           [MENU_COMPRESS] = "Compress new backups",
+        [MENU_KEEP_AUTO] = "Keep auto backups", [MENU_HISTORY] = "Activity history",
+        [MENU_RESCAN] = "Rescan SD card",   [MENU_ABOUT] = "About DSavE",
+    };
     for (int i = 0; i < MENU_ITEMS; i++)
     {
         const Ctl *ctl = find_ctl(ctls, ID_ITEM + i);
@@ -2267,14 +2395,14 @@ static void draw_menu(Canvas *c, const App *app, const Ctls *ctls)
         gfx_text(c, &font_body, ctl->x + 8, ty, items[i], C_TEXT);
         int right = ctl->x + ctl->w - 8;
         char val[48];
-        if (i == 0)
+        if (i == MENU_KERNEL)
         {
             snprintf(val, sizeof(val), "\xe2\x86\x90 %s \xe2\x86\x92", kernel_name(lib->kernels.active));
             gfx_text_right(c, &font_small, right, ty + 1, val, C_ACCENT);
         }
-        else if (i == 1)
+        else if (i == MENU_COMPRESS)
             draw_switch(c, right - 26, ctl->y + (ctl->h - 14) / 2, lib->compress);
-        else if (i == 2)
+        else if (i == MENU_KEEP_AUTO)
         {
             if (lib->keep_auto)
                 snprintf(val, sizeof(val), "\xe2\x86\x90 Last %d \xe2\x86\x92", lib->keep_auto);
@@ -2394,6 +2522,87 @@ static void draw_import(Canvas *c, const App *app, const Ctls *ctls)
     gfx_text_fit(c, &font_small, 8, BAR_Y + 4, SCREEN_W - 16, into, C_FAINT);
     bool can = app->import_count && app->imports[app->import_sel].valid;
     draw_button(c, app, find_ctl(ctls, ID_DLG_OK), "A", "Import", can);
+    draw_button(c, app, find_ctl(ctls, ID_DLG_CANCEL), "B", "Back", true);
+}
+
+static void draw_history(Canvas *c, const App *app, const Ctls *ctls)
+{
+    gfx_clear(c, C_BG);
+    gfx_fill(c, 0, 0, SCREEN_W, HEADER_H, C_PANEL);
+    draw_pill(c, app, find_ctl(ctls, ID_BACK), "B", "Back");
+    gfx_text_right(c, &font_small, SCREEN_W - 6, 4, "Activity, newest first", C_MUTED);
+
+    if (!app->act_count)
+        draw_wrapped(c, &font_small, 10, 34, SCREEN_W - 20,
+                     "Nothing yet. Backups, restores, copies, imports, exports and trashed backups are "
+                     "listed here, and kept in _DSavE/log.txt.",
+                     C_MUTED, 5);
+    for (int i = 0; i < ACT_ROWS && app->act_scroll + i < app->act_count; i++)
+    {
+        int idx = app->act_scroll + i;
+        const Activity *a = &app->acts[idx];
+        int y = LIST_Y + i * ACT_ROW_H;
+        bool sel = idx == app->act_sel;
+        if (sel)
+            gfx_rrect(c, 3, y + 1, SCREEN_W - 10, ACT_ROW_H - 2, 5, C_SELECT);
+        else if (pressed(app, ID_ITEM + i))
+            gfx_rrect(c, 3, y + 1, SCREEN_W - 10, ACT_ROW_H - 2, 5, C_PANEL2);
+
+        // "14 Oct 08:59": the year is left out to make room for the title.
+        char when[48];
+        if (pretty_time(a->time, when, sizeof(when)))
+        {
+            char *year = strchr(when, ' ') ? strchr(strchr(when, ' ') + 1, ' ') : NULL;
+            if (year && strlen(year) > 5)
+                memmove(year, year + 5, strlen(year + 5) + 1);
+        }
+        else
+            snprintf(when, sizeof(when), "%s", a->time);
+        int ww = gfx_text_width(&font_small, when);
+        gfx_text_right(c, &font_small, SCREEN_W - 12, y + 3, when, C_FAINT);
+        Color kc = a->kind == ACT_RESTORE || a->kind == ACT_COPY || a->kind == ACT_UNDO ? C_WARN
+                   : a->kind == ACT_TRASH                                             ? C_ERR
+                                                                                        : C_ACCENT;
+        int x = gfx_text(c, &font_small, 10, y + 3, activity_kind_name(a->kind), kc);
+        gfx_text_fit(c, &font_small, x + 6, y + 3, SCREEN_W - 12 - ww - 6 - x - 6, a->title, C_TEXT);
+
+        Backup named = { 0 };
+        snprintf(named.name, sizeof(named.name), "%s", a->backup);
+        named.is_auto = strncmp(a->backup, "auto_", 5) == 0;
+        char label[64], detail[160], base[DSAVE_PATH_MAX];
+        backup_label(&named, label, sizeof(label));
+        switch (a->kind)
+        {
+            case ACT_EXPORT:
+                path_basename(base, sizeof(base), a->path);
+                snprintf(detail, sizeof(detail), "%s \xe2\x86\x92 %s", label, base);
+                break;
+            case ACT_COPY:
+                snprintf(detail, sizeof(detail), "Copied over another kernel's save");
+                break;
+            case ACT_UNDO:
+                snprintf(detail, sizeof(detail), "Put back %s", label);
+                break;
+            default:
+                snprintf(detail, sizeof(detail), "%s", label);
+                break;
+        }
+        if (activity_can_undo(a))
+            gfx_text_right(c, &font_small, SCREEN_W - 12, y + 15, "A undo", sel ? C_ACCENT : C_FAINT);
+        gfx_text_fit(c, &font_small, 10, y + 15, SCREEN_W - 12 - 50 - 10, detail, C_MUTED);
+    }
+    draw_scrollbar(c, SCREEN_W - 5, LIST_Y + 1, ACT_ROWS * ACT_ROW_H - 2, app->act_scroll, ACT_ROWS,
+                   app->act_count);
+
+    gfx_fill(c, 0, BAR_Y - 3, SCREEN_W, SCREEN_H - BAR_Y + 3, C_PANEL);
+    const Activity *a = cur_activity(app);
+    gfx_text_fit(c, &font_small, 8, BAR_Y + 4, SCREEN_W - 16,
+                 !a                       ? "Kept in _DSavE/log.txt"
+                 : activity_can_undo(a)   ? "Undo puts back the save from before this"
+                 : a->card && a->kind == ACT_RESTORE ? "Game card: restore its Auto backup instead"
+                                                     : "Only restores and copies can be undone",
+                 C_FAINT);
+    draw_button(c, app, find_ctl(ctls, ID_DLG_OK), "A", "Undo", a && activity_can_undo(a));
     draw_button(c, app, find_ctl(ctls, ID_DLG_CANCEL), "B", "Back", true);
 }
 
@@ -2524,6 +2733,7 @@ bool app_render(App *app, Canvas *top, Canvas *bottom)
         case MODAL_MENU: draw_menu(bottom, app, &modal); break;
         case MODAL_MORE: draw_more(bottom, app, &modal); break;
         case MODAL_IMPORT: draw_import(bottom, app, &modal); break;
+        case MODAL_HISTORY: draw_history(bottom, app, &modal); break;
         case MODAL_KEYBOARD: draw_keyboard(bottom, app, &modal); break;
         case MODAL_ABOUT:
             app->modal = MODAL_MENU;
