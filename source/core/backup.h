@@ -149,6 +149,10 @@ typedef enum {
 DsaveResult backup_export(const Library *lib, const Game *game, const Backup *b, ExportFormat format,
                           char *out_path, size_t out_size);
 
+// The name an emulator looks for, without the extension: the ROM's file
+// name. A game card has no ROM, so it gets its title and game code.
+void backup_export_stem(const Game *game, char *out, size_t size);
+
 // Name for a safety copy made before a restore: "auto_<timestamp>".
 void backup_auto_name(char *out, size_t size);
 

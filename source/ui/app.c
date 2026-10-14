@@ -870,6 +870,24 @@ static void run_op(App *app, UiOp op)
                            app->check.backups == 1 ? "" : "s");
             break;
 
+        case OP_EXPORT_ALL:
+        {
+            char path[DSAVE_PATH_MAX];
+            ArchiveStats st;
+            DsaveResult r = archive_export(lib, app->zip_mode, path, sizeof(path), &st, on_progress, app);
+            if (r == DSAVE_OK && st.skipped)
+                set_status(app, STATUS_ERROR, "Zip saved; %d damaged backup%s left out", st.skipped,
+                           st.skipped == 1 ? "" : "s");
+            else if (r == DSAVE_OK)
+                set_status(app, STATUS_OK, "Saved %d game%s to _DSavE/export as .zip", st.games,
+                           st.games == 1 ? "" : "s");
+            else if (r == DSAVE_ERR_NO_SAVE)
+                set_status(app, STATUS_ERROR, "No backups to export yet");
+            else
+                result_status(app, r, "");
+            break;
+        }
+
         case OP_USE_SLOT:
             if (!g || app->copy_sel < g->loc_count)
                 break;
@@ -1112,6 +1130,9 @@ static void menu_activate(App *app, int item)
             break;
         case MENU_CHECK:
             queue(app, OP_CHECK, "Checking every backup");
+            break;
+        case MENU_ZIP:
+            queue(app, OP_EXPORT_ALL, "Writing the .zip");
             break;
         case MENU_RESCAN:
             queue(app, OP_SCAN, "Scanning the SD card");
@@ -1672,6 +1693,11 @@ static void input_modal(App *app, const UiInput *in)
                 cycle_kernel(app, (k & UI_KEY_LEFT) ? -1 : 1);
             else if (app->menu_sel == MENU_COMPRESS && (k & (UI_KEY_LEFT | UI_KEY_RIGHT)))
                 menu_activate(app, MENU_COMPRESS);
+            else if (app->menu_sel == MENU_ZIP && (k & (UI_KEY_LEFT | UI_KEY_RIGHT)))
+            {
+                app->zip_mode = app->zip_mode == ARCHIVE_NEWEST ? ARCHIVE_ALL : ARCHIVE_NEWEST;
+                app->dirty = true;
+            }
             else if (app->menu_sel == MENU_KEEP_AUTO && (k & (UI_KEY_LEFT | UI_KEY_RIGHT)))
                 cycle_keep(app, (k & UI_KEY_LEFT) ? -1 : 1);
             else if (in->down & UI_KEY_A)
@@ -2495,7 +2521,7 @@ static void draw_menu(Canvas *c, const App *app, const Ctls *ctls)
     static const char *const items[MENU_ITEMS] = {
         [MENU_KERNEL] = "Kernel",           [MENU_COMPRESS] = "Compress new backups",
         [MENU_KEEP_AUTO] = "Keep auto backups", [MENU_HISTORY] = "Activity history",
-        [MENU_CHECK] = "Check all backups",
+        [MENU_CHECK] = "Check all backups",       [MENU_ZIP] = "Export all to .zip",
         [MENU_RESCAN] = "Rescan SD card",   [MENU_ABOUT] = "About DSavE",
     };
     for (int i = 0; i < MENU_ITEMS; i++)
@@ -2515,6 +2541,11 @@ static void draw_menu(Canvas *c, const App *app, const Ctls *ctls)
         }
         else if (i == MENU_COMPRESS)
             draw_switch(c, right - 26, ctl->y + (ctl->h - 14) / 2, lib->compress);
+        else if (i == MENU_ZIP)
+        {
+            snprintf(val, sizeof(val), "\xe2\x86\x90 %s \xe2\x86\x92", app->zip_mode == ARCHIVE_ALL ? "All" : "Newest");
+            gfx_text_right(c, &font_small, right, ty + 1, val, C_ACCENT);
+        }
         else if (i == MENU_KEEP_AUTO)
         {
             if (lib->keep_auto)

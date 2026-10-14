@@ -506,6 +506,23 @@ static void test_main_flow(void)
     press(UI_KEY_A);
     CHECK(app.modal == MODAL_NONE && app.status_kind == STATUS_ERROR);
     CHECK(strcmp(app.backups[app.hist_sel].name, victim.name) == 0);
+
+    // Export all to .zip: Left/Right picks newest or all; A writes it.
+    press(UI_KEY_START);
+    while (app.menu_sel != MENU_ZIP)
+        press(UI_KEY_DOWN);
+    CHECK(app.zip_mode == ARCHIVE_NEWEST);
+    press(UI_KEY_RIGHT);
+    CHECK(app.zip_mode == ARCHIVE_ALL);
+    shot("09j_menu_zip");
+    press(UI_KEY_A);
+    settle();
+    CHECK(app.status_kind == STATUS_ERROR && strstr(app.status, "1 damaged backup left out")); // Damaged above
+    char zips[DSAVE_PATH_MAX];
+    p(zips, "_DSavE/export");
+    CHECK(dir_exists(zips));
+    shot("09k_zipped");
+    press(UI_KEY_B);
 }
 
 static void test_copies(void)

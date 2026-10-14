@@ -12,6 +12,9 @@
 #include <sys/resource.h>
 
 #include "../source/core/activity.h"
+#include "../source/core/archive.h"
+#include "../source/third_party/miniz/miniz_config.h"
+#include "../source/third_party/miniz/miniz.h"
 #include "../source/core/backup.h"
 #include "../source/core/cardsave.h"
 #include "../source/core/check.h"
@@ -1538,6 +1541,108 @@ static void test_check_all(void)
     CHECK(strcmp(check_kind_name(CHECK_DAMAGED), "Damaged") == 0);
 }
 
+// Read a whole file into memory (the zip tests open it with miniz).
+static void *slurp(const char *path, size_t *len)
+{
+    long n = file_size(path);
+    FILE *f = fopen(path, "rb");
+    void *buf = n >= 0 ? malloc((size_t)n + 1) : NULL;
+    if (!f || !buf || fread(buf, 1, (size_t)n, f) != (size_t)n)
+    {
+        free(buf);
+        buf = NULL;
+    }
+    if (f)
+        fclose(f);
+    *len = buf ? (size_t)n : 0;
+    return buf;
+}
+
+static void test_archive(void)
+{
+    new_card();
+    make_dir("_pico");
+    make_rom("Game.nds", "GAME", "ABCE", NULL);
+    make_rom("roms/Other Game.nds", "OTHER", "ABDE", NULL);
+    make_rom("NoBackups.nds", "NONE", "ABFE", NULL);
+    make_save("Game.sav", 64 * KB, 16 * KB, 71);
+    make_save("roms/Other Game.sav", 8 * KB, 4 * KB, 72);
+    library_scan(&lib, root);
+    Game *g = find_game("ABCE"), *o = find_game("ABDE");
+    if (!g || !o)
+        return;
+
+    char out[DSAVE_PATH_MAX];
+    ArchiveStats st;
+    CHECK(archive_export(&lib, ARCHIVE_NEWEST, out, sizeof(out), &st, NULL, NULL) == DSAVE_ERR_NO_SAVE);
+
+    Backup old, newest, other, bad;
+    CHECK(backup_create(&lib, g, "old", false, &old) == DSAVE_OK);
+    make_save("Game.sav", 64 * KB, 16 * KB, 73);
+    library_refresh_game(&lib, g);
+    CHECK(library_set_compress(&lib, true));
+    CHECK(backup_create(&lib, g, "newest", false, &newest) == DSAVE_OK && newest.compressed);
+    CHECK(library_set_compress(&lib, false));
+    CHECK(backup_create(&lib, o, "other", false, &other) == DSAVE_OK);
+    CHECK(backup_create(&lib, o, "bad", false, &bad) == DSAVE_OK);
+    FILE *f = fopen(bad.file, "r+b");
+    fputc(0x11, f);
+    fclose(f);
+    // Make "bad" the newest of its game, so newest-only falls back to "other".
+    char ini[DSAVE_PATH_MAX];
+    path_join(ini, sizeof(ini), bad.dir, "backup.ini");
+    f = fopen(ini, "a");
+    fputs("created=2099-01-01_00-00-00\n", f);
+    fclose(f);
+
+    // Newest: one .sav per game, named after the ROM, damaged ones skipped.
+    long calls = 0;
+    CHECK(archive_export(&lib, ARCHIVE_NEWEST, out, sizeof(out), &st, count_calls, &calls) == DSAVE_OK);
+    CHECK(st.games == 2 && st.backups == 2 && st.skipped == 1 && calls > 0);
+    CHECK(strstr(out, "_DSavE/export/DSavE_") && has_ext(out, ".zip"));
+    size_t len;
+    void *data = slurp(out, &len);
+    mz_zip_archive zip;
+    memset(&zip, 0, sizeof(zip));
+    CHECK(data && mz_zip_reader_init_mem(&zip, data, len, 0));
+    CHECK(mz_zip_reader_get_num_files(&zip) == 2);
+    size_t n;
+    void *sav = mz_zip_reader_extract_file_to_heap(&zip, "Game.sav", &n, 0);
+    CHECK(sav && n == (size_t)newest.size && crc32_update(0, sav, n) == newest.crc32);
+    free(sav);
+    sav = mz_zip_reader_extract_file_to_heap(&zip, "Other Game.sav", &n, 0);
+    CHECK(sav && n == (size_t)other.size && crc32_update(0, sav, n) == other.crc32);
+    free(sav);
+    mz_zip_reader_end(&zip);
+    free(data);
+
+    // All: the _DSavE/saves layout, raw saves plus backup.ini.
+    char gdir[DSAVE_PATH_MAX], folder[DSAVE_PATH_MAX], name[DSAVE_PATH_MAX];
+    backup_game_dir(&lib, g, gdir, sizeof(gdir));
+    path_basename(folder, sizeof(folder), gdir);
+    CHECK(archive_export(&lib, ARCHIVE_ALL, out, sizeof(out), &st, NULL, NULL) == DSAVE_OK);
+    CHECK(st.games == 2 && st.backups == 3 && st.skipped == 1);
+    data = slurp(out, &len);
+    memset(&zip, 0, sizeof(zip));
+    CHECK(data && mz_zip_reader_init_mem(&zip, data, len, 0));
+    CHECK(mz_zip_reader_get_num_files(&zip) == 6);
+    snprintf(name, sizeof(name), "saves/%s/newest/GAME.sav", folder);
+    sav = mz_zip_reader_extract_file_to_heap(&zip, name, &n, 0);
+    CHECK(sav && n == (size_t)newest.size && crc32_update(0, sav, n) == newest.crc32); // Stored raw
+    free(sav);
+    snprintf(name, sizeof(name), "saves/%s/old/backup.ini", folder);
+    sav = mz_zip_reader_extract_file_to_heap(&zip, name, &n, 0);
+    CHECK(sav && n > 10 && strstr((char *)sav, "crc32=") != NULL);
+    free(sav);
+    mz_zip_reader_end(&zip);
+    free(data);
+
+    // No temporary file is left behind.
+    char tmp[DSAVE_PATH_MAX];
+    p(tmp, "_DSavE/export/.zip.tmp");
+    CHECK(!file_exists(tmp));
+}
+
 // ---------------------------------------------------------------------------
 // Game card saves, against a fake save chip
 
@@ -2257,6 +2362,7 @@ int main(void)
     test_note_and_keep();
     test_activity();
     test_check_all();
+    test_archive();
     test_icon();
     test_card_detect();
     test_card_write();
