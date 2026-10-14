@@ -69,20 +69,18 @@ static FILE *create(const char *rel)
     return fopen(path, "wb");
 }
 
-// banner is Latin-1, so "\xe9" is é.
-static void make_rom(const char *rel, const char *code, const char *banner)
+// A banner at rom + offset: the English title (Latin-1, so "\xe9" is é)
+// and an icon, a ring in a colour picked from the game code on a dark
+// square.
+static void make_banner(uint8_t *rom, uint32_t offset, const char *code, const char *banner)
 {
-    static uint8_t rom[0x200 + 0xA00];
-    memset(rom, 0, sizeof(rom));
-    memcpy(rom, "GAME", 4);
-    memcpy(rom + 0x0C, code, 4);
-    rom[0x69] = 0x02; // Banner at 0x200
-    uint8_t *en = rom + 0x200 + 0x240 + 0x100;
+    rom[0x68] = (uint8_t)offset;
+    rom[0x69] = (uint8_t)(offset >> 8);
+    uint8_t *en = rom + offset + 0x240 + 0x100;
     for (size_t i = 0; banner[i]; i++)
         en[i * 2] = (uint8_t)banner[i];
 
-    // Icon: a ring in a colour picked from the game code, on a dark square.
-    uint8_t *bitmap = rom + 0x200 + 0x20, *pal = rom + 0x200 + 0x220;
+    uint8_t *bitmap = rom + offset + 0x20, *pal = rom + offset + 0x220;
     unsigned hue = (unsigned)(code[0] * 7 + code[1] * 13 + code[2] * 3) % 6;
     static const uint16_t rings[6] = { 0x001F, 0x03E0, 0x7C00, 0x03FF, 0x7C1F, 0x7FE0 };
     uint16_t colours[4] = { 0, 0x1084, rings[hue], 0x7FFF };
@@ -101,6 +99,40 @@ static void make_rom(const char *rel, const char *code, const char *banner)
             bitmap[tile * 32 + in / 2] |= (uint8_t)((in & 1) ? v << 4 : v);
         }
     }
+}
+
+static void make_rom(const char *rel, const char *code, const char *banner)
+{
+    static uint8_t rom[0x200 + 0xA00];
+    memset(rom, 0, sizeof(rom));
+    memcpy(rom, "GAME", 4);
+    memcpy(rom + 0x0C, code, 4);
+    make_banner(rom, 0x200, code, banner);
+    FILE *f = create(rel);
+    fwrite(rom, 1, sizeof(rom), f);
+    fclose(f);
+}
+
+static void put_le32(uint8_t *b, uint32_t v)
+{
+    for (int i = 0; i < 4; i++)
+        b[i] = (uint8_t)(v >> (8 * i));
+}
+
+// A DSiWare ROM: unit code 3, title ID 00030004, the save sizes and the
+// banner save flag in its DSi header.
+static void make_dsi_rom(const char *rel, const char *code, const char *banner, uint32_t pub, uint32_t prv)
+{
+    static uint8_t rom[0x1000 + 0xA00];
+    memset(rom, 0, sizeof(rom));
+    memcpy(rom, "DSIWARE", 7);
+    memcpy(rom + 0x0C, code, 4);
+    rom[0x12] = 0x03;
+    rom[0x1BF] = 0x04;
+    put_le32(rom + 0x234, 0x00030004);
+    put_le32(rom + 0x238, pub);
+    put_le32(rom + 0x23C, prv);
+    make_banner(rom, 0x1000, code, banner);
     FILE *f = create(rel);
     fwrite(rom, 1, sizeof(rom), f);
     fclose(f);
@@ -835,6 +867,65 @@ static void test_game_card(void)
     card_slot = NULL;
 }
 
+// A DSiWare title on a DSpico: its .pub, .prv and .bnr back up as one,
+// restore together, and export as the files Pico looks for.
+static void test_dsiware(void)
+{
+    new_card();
+    make_dir("_pico");
+    make_rom("Mario Kart DS.nds", "AMCE", "Mario Kart DS");
+    make_dsi_rom("dsiware/Flipnote Studio.nds", "KGUE", "Flipnote Studio", 192 * KB, 16 * KB);
+    make_save("dsiware/Flipnote Studio.pub", 192 * KB, 192 * KB, 30);
+    make_save("dsiware/Flipnote Studio.prv", 16 * KB, 16 * KB, 31);
+    make_save("dsiware/Flipnote Studio.bnr", 16 * KB, 16 * KB, 32);
+    start_app();
+    select_game("KGUE");
+    Game *g = game();
+    CHECK(g->info.dsiware && g->has_save && g->save_size == 224 * KB);
+    shot("30_dsiware");
+
+    // A: one backup of all three files.
+    press(UI_KEY_A);
+    CHECK(status_ok() && app.backup_count == 1 && app.backups[0].dsiware);
+    CHECK(backup_data_size(&app.backups[0]) == 224 * KB);
+    shot("31_dsiware_backed_up");
+
+    // X: DSiWare backups stay raw.
+    press(UI_KEY_X);
+    CHECK(app.status_kind == STATUS_ERROR && strstr(app.status, "DSiWare"));
+
+    // Y: there is no .dsv for DSiWare, so Down skips it.
+    press(UI_KEY_Y);
+    while (app.more_sel != 5)
+        press(UI_KEY_DOWN);
+    shot("32_dsiware_more");
+    press(UI_KEY_DOWN);
+    CHECK(app.more_sel == 7);
+    press(UI_KEY_UP);
+    CHECK(app.more_sel == 5);
+    press(UI_KEY_A);
+    CHECK(status_ok() && strstr(app.status, ".pub, .prv, .bnr"));
+    char out[DSAVE_PATH_MAX];
+    p(out, "_DSavE/export/Flipnote Studio.prv");
+    CHECK(file_size(out) == 16 * KB);
+
+    // Play on, then B: every file comes back.
+    char pub[DSAVE_PATH_MAX], prv[DSAVE_PATH_MAX];
+    p(pub, "dsiware/Flipnote Studio.pub");
+    p(prv, "dsiware/Flipnote Studio.prv");
+    uint32_t pub_crc = crc_of(pub), prv_crc = crc_of(prv);
+    make_save("dsiware/Flipnote Studio.pub", 192 * KB, 192 * KB, 40);
+    make_save("dsiware/Flipnote Studio.prv", 16 * KB, 16 * KB, 41);
+    press(UI_KEY_B);
+    CHECK(app.modal == MODAL_CONFIRM && strstr(app.dlg_text, "DSiWare"));
+    shot("33_dsiware_restore");
+    hold(UI_KEY_A, 70);
+    CHECK(app.modal == MODAL_NONE && status_ok());
+    CHECK(crc_of(pub) == pub_crc && crc_of(prv) == prv_crc);
+    CHECK(app.backup_count == 2 && app.backups[0].is_auto && app.backups[0].dsiware);
+    shot("34_dsiware_restored");
+}
+
 int main(int argc, char **argv)
 {
     if (argc > 1)
@@ -854,6 +945,7 @@ int main(int argc, char **argv)
     test_empty_card();
     test_import();
     test_game_card();
+    test_dsiware();
 
     remove_tree(base);
     library_free(&lib);
