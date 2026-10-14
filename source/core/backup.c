@@ -43,6 +43,7 @@ const char *dsave_result_str(DsaveResult r)
         case DSAVE_ERR_CARD:          return "The game card's save chip did not answer";
         case DSAVE_ERR_KEPT:          return "This backup is marked Keep";
         case DSAVE_ERR_ROLLBACK_FAILED: return "Restore failed; restore the Auto backup";
+        case DSAVE_ERR_GONE:          return "That backup is no longer on the card";
     }
     return "Unknown error";
 }

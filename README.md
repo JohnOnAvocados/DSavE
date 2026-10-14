@@ -40,6 +40,9 @@ your game saves without a PC.
 - **Restores safely.** Every backup is checked (size, CRC-32 and game code)
   before anything is written, the current save is backed up first, and the
   result is read back and rolled back if it does not match.
+- **Keeps a log, with undo.** Every backup, restore, copy, import, export and
+  trashed backup is written to `_DSavE/log.txt`. *Activity history* in the
+  menu lists them, and A on a restore puts back the save it replaced.
 - **Compresses backups if you want.** Compressed backups are standard gzip
   (`.sav.gz`), so `gunzip` or 7-Zip on a PC turns them back into a raw save.
 - **Imports and exports emulator saves**: melonDS, DeSmuME, DraStic, no$gba
@@ -60,6 +63,7 @@ _DSavE/saves/<GAMECODE> <title>/<backup name>/<title>.sav     (or .sav.gz)
 _DSavE/export/    exported saves (<rom name>.sav or .dsv)
 _DSavE/import/    saves to import as backups
 _DSavE/_TRASH_/   deleted backups
+_DSavE/log.txt    what DSavE did, newest last
 ```
 
 Games are named by their banner title in English, French, German, Italian,

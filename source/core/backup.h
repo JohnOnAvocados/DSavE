@@ -40,6 +40,7 @@ typedef enum {
     DSAVE_ERR_KEPT,           // The backup is marked Keep, so it can't be trashed
     DSAVE_ERR_ROLLBACK_FAILED,// Restore failed and the old save could not be put
                               // back; the auto backup holds it
+    DSAVE_ERR_GONE,           // The backup or game it needs is no longer there
 } DsaveResult;
 
 const char *dsave_result_str(DsaveResult r);

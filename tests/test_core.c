@@ -11,6 +11,7 @@
 #include <signal.h>
 #include <sys/resource.h>
 
+#include "../source/core/activity.h"
 #include "../source/core/backup.h"
 #include "../source/core/cardsave.h"
 #include "../source/core/ini.h"
@@ -1386,6 +1387,84 @@ static void test_note_and_keep(void)
     CHECK(library_set_keep_auto(&lib, LIBRARY_KEEP_AUTO_DEFAULT));
 }
 
+static void test_activity(void)
+{
+    new_card();
+    make_dir("_pico");
+    make_rom("Game.nds", "GAME", "ABCE", NULL);
+    make_save("Game.sav", 64 * KB, 16 * KB, 71);
+    library_scan(&lib, root);
+    Game *g = find_game("ABCE");
+    if (!g)
+        return;
+    Activity acts[ACTIVITY_LIST_MAX];
+    CHECK(activity_list(&lib, acts, ACTIVITY_LIST_MAX) == 0);
+
+    Backup b, safety;
+    CHECK(backup_create(&lib, g, "start", false, &b) == DSAVE_OK);
+    CHECK(activity_log(&lib, ACT_BACKUP, g, b.name, b.crc32, "", g->save_path));
+    char save[DSAVE_PATH_MAX];
+    snprintf(save, sizeof(save), "%s", g->save_path);
+    uint32_t before = crc_of(save);
+
+    // Restore over a newer save, then undo it.
+    make_save("Game.sav", 64 * KB, 16 * KB, 72);
+    library_refresh_game(&lib, g);
+    uint32_t newer = crc_of(save);
+    CHECK(newer != before);
+    CHECK(backup_restore(&lib, g, &b, &safety) == DSAVE_OK && safety.name[0]);
+    CHECK(activity_log(&lib, ACT_RESTORE, g, b.name, b.crc32, safety.name, g->save_path));
+    CHECK(crc_of(save) == before);
+
+    int n = activity_list(&lib, acts, ACTIVITY_LIST_MAX);
+    CHECK(n == 2 && acts[0].kind == ACT_RESTORE && acts[1].kind == ACT_BACKUP);
+    CHECK(strcmp(acts[0].backup, "start") == 0 && strcmp(acts[0].safety, safety.name) == 0);
+    CHECK(strcmp(acts[0].game_code, "ABCE") == 0 && strcmp(acts[0].path, save) == 0);
+    CHECK(acts[0].crc32 == b.crc32 && !acts[0].card);
+    CHECK(activity_can_undo(&acts[0]) && !activity_can_undo(&acts[1]));
+
+    int gi = -1;
+    Backup undo_safety;
+    CHECK(activity_undo(&lib, &acts[0], &gi, &undo_safety) == DSAVE_OK);
+    CHECK(gi >= 0 && &lib.games[gi] == g && undo_safety.name[0]);
+    CHECK(crc_of(save) == newer);
+
+    // The undo is logged, and can itself be undone.
+    n = activity_list(&lib, acts, ACTIVITY_LIST_MAX);
+    CHECK(n == 3 && acts[0].kind == ACT_UNDO && activity_can_undo(&acts[0]));
+    CHECK(activity_undo(&lib, &acts[0], NULL, NULL) == DSAVE_OK);
+    CHECK(crc_of(save) == before);
+
+    // An auto backup that's gone can't be undone to.
+    n = activity_list(&lib, acts, ACTIVITY_LIST_MAX);
+    Activity gone = acts[0];
+    snprintf(gone.safety, sizeof(gone.safety), "auto_nope");
+    CHECK(activity_undo(&lib, &gone, NULL, NULL) == DSAVE_ERR_GONE);
+
+    // Tabs and line breaks in a title don't break the line.
+    char title[sizeof(g->title)];
+    snprintf(title, sizeof(title), "%s", g->title);
+    snprintf(g->title, sizeof(g->title), "Tab\there\nnewline");
+    CHECK(activity_log(&lib, ACT_EXPORT, g, "start", 0, "", "x"));
+    snprintf(g->title, sizeof(g->title), "%s", title);
+    n = activity_list(&lib, acts, ACTIVITY_LIST_MAX);
+    CHECK(acts[0].kind == ACT_EXPORT && strcmp(acts[0].title, "Tab here newline") == 0);
+
+    // Junk lines are skipped; the log rotates and keeps the newest.
+    char logp[DSAVE_PATH_MAX];
+    p(logp, ACTIVITY_FILE);
+    FILE *f = fopen(logp, "a");
+    fputs("garbage line\n\n2026\tbackup\n", f);
+    fclose(f);
+    int before_junk = n;
+    CHECK(activity_list(&lib, acts, ACTIVITY_LIST_MAX) == before_junk);
+    for (int i = 0; i < 700; i++)
+        activity_log(&lib, ACT_BACKUP, g, "spam", (uint32_t)i, "", g->save_path);
+    CHECK(file_size(logp) <= ACTIVITY_ROTATE_BYTES + 512);
+    n = activity_list(&lib, acts, ACTIVITY_LIST_MAX);
+    CHECK(n == ACTIVITY_LIST_MAX && acts[0].crc32 == 699 && acts[ACTIVITY_LIST_MAX - 1].crc32 == 699 - (ACTIVITY_LIST_MAX - 1));
+}
+
 // ---------------------------------------------------------------------------
 // Game card saves, against a fake save chip
 
@@ -2058,6 +2137,7 @@ int main(void)
     test_import();
     test_prune_auto();
     test_note_and_keep();
+    test_activity();
     test_icon();
     test_card_detect();
     test_card_write();

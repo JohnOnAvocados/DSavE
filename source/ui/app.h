@@ -13,6 +13,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "../core/activity.h"
 #include "../core/backup.h"
 #include "../core/cardsave.h"
 #include "../core/library.h"
@@ -61,7 +62,11 @@ typedef enum {
     MODAL_KEYBOARD,
     MODAL_ABOUT,
     MODAL_IMPORT,   // Files in _DSavE/import
+    MODAL_HISTORY,  // The activity log, with undo
 } UiModal;
+
+// START menu items
+enum { MENU_KERNEL, MENU_COMPRESS, MENU_KEEP_AUTO, MENU_HISTORY, MENU_RESCAN, MENU_ABOUT, MENU_ITEMS };
 
 // Work that touches the SD card. It is queued, the UI draws one frame saying
 // what it is doing, and then it runs.
@@ -87,6 +92,7 @@ typedef enum {
     OP_CARD_CHECK,    // Look at slot 1 again
     OP_NOTE,          // Set the selected backup's note from the keyboard
     OP_KEEP,          // Toggle the selected backup's Keep mark
+    OP_UNDO,          // Undo the selected restore in the activity log
 } UiOp;
 
 typedef enum {
@@ -126,6 +132,9 @@ typedef struct {
     ImportFile imports[IMPORT_LIST_MAX];
     int import_count, import_sel, import_scroll;
     int import_game;      // Game the chosen import file goes into
+
+    Activity acts[ACTIVITY_LIST_MAX];
+    int act_count, act_sel, act_scroll;
 
     char kb_text[BACKUP_NAME_MAX + 1];
     int kb_row, kb_col;
