@@ -51,17 +51,24 @@
 #define MENU_Y 28
 #define MENU_PITCH 20
 
-#define MORE_ITEMS 8
+#define MORE_ITEMS 9
 #define MORE_BOX_Y 4
 #define MORE_BOX_H 184
-#define MORE_Y 26
-#define MORE_PITCH 19
+#define MORE_Y 25
+#define MORE_PITCH 17
 
 // "More" popup items
-enum { MORE_RENAME, MORE_NOTE, MORE_KEEP, MORE_TRASH, MORE_EXPORT_SAV, MORE_EXPORT_DSV, MORE_NEW, MORE_IMPORT };
+enum { MORE_RENAME, MORE_NOTE, MORE_KEEP, MORE_TRASH, MORE_HEX, MORE_EXPORT_SAV, MORE_EXPORT_DSV, MORE_NEW, MORE_IMPORT };
 #define IMPORT_ROWS 5
 #define ACT_ROW_H 30
 #define ACT_ROWS 4
+#define HEX_Y 25
+#define HEX_ROW_H 13
+#define HEX_BYTE_X 50
+#define HEX_BYTE_W 19
+#define HEX_ASCII_X 205
+#define HEX_ASCII_W 6
+#define HEX_JUMP 4096 // Left/Right when not comparing
 #define CHECK_LIST_Y 42
 #define CHECK_ROW_H 25
 #define CHECK_ROWS 4
@@ -568,6 +575,136 @@ static void check_choose(App *app)
     }
 }
 
+// ---------------------------------------------------------------------------
+// Hex viewer
+
+static void hex_close_cmp(App *app)
+{
+    if (app->hex_cmp_open)
+        savefile_close(&app->hex_cr);
+    app->hex_cmp_open = false;
+    app->hex_cmp = HEX_CMP_NONE;
+    memset(&app->diff, 0, sizeof(app->diff));
+}
+
+static void hex_close(App *app)
+{
+    hex_close_cmp(app);
+    savefile_close(&app->hex_r);
+    app->screen = SCREEN_MAIN;
+    app->status[0] = '\0';
+    app->dirty = true;
+}
+
+// Read the page at hex_off. Bytes past the end of the compared save read
+// as 0xFF, as save_diff counts them.
+static void hex_load(App *app)
+{
+    long last = app->hex_size > HEX_PAGE ? (app->hex_size - 1) / HEX_COLS * HEX_COLS - (HEX_ROWS - 1) * HEX_COLS : 0;
+    app->hex_off = clampi((int)app->hex_off, 0, (int)(last > 0 ? last : 0)) / HEX_COLS * HEX_COLS;
+    memset(app->hex_buf, 0, sizeof(app->hex_buf));
+    memset(app->hex_cbuf, 0xFF, sizeof(app->hex_cbuf));
+    app->hex_got = 0;
+    if (savefile_seek(&app->hex_r, app->hex_off))
+        app->hex_got = (int)savefile_read(&app->hex_r, app->hex_buf, HEX_PAGE);
+    if (app->hex_cmp_open && app->hex_off < app->hex_cmp_size && savefile_seek(&app->hex_cr, app->hex_off))
+        savefile_read(&app->hex_cr, app->hex_cbuf, HEX_PAGE);
+    app->dirty = true;
+}
+
+static const char *hex_cmp_path(App *app, int cmp)
+{
+    if (cmp == HEX_CMP_LIVE)
+    {
+        const Game *g = cur_game(app);
+        return g && g->has_save && !g->is_card ? g->save_path : NULL;
+    }
+    return cmp >= 0 && cmp < app->backup_count ? app->backups[cmp].file : NULL;
+}
+
+// The next thing to compare with, in turn: the current save, then each
+// other backup, then nothing.
+static void hex_next_compare(App *app)
+{
+    int cmp = app->hex_cmp;
+    hex_close_cmp(app);
+    for (int step = 0; step < app->backup_count + 2; step++)
+    {
+        cmp = cmp == HEX_CMP_NONE ? HEX_CMP_LIVE : cmp + 1;
+        if (cmp >= app->backup_count)
+            break;
+        if (cmp == app->hex_backup)
+            continue;
+        const char *path = hex_cmp_path(app, cmp);
+        if (!path)
+            continue;
+        if (!save_diff(app->backups[app->hex_backup].file, path, &app->diff) ||
+            !savefile_open(&app->hex_cr, path))
+        {
+            memset(&app->diff, 0, sizeof(app->diff));
+            set_status(app, STATUS_ERROR, "Couldn't read that save");
+            break;
+        }
+        app->hex_cmp_open = true;
+        app->hex_cmp = cmp;
+        app->hex_cmp_size = app->diff.size_b;
+        // Show the first difference.
+        if (app->diff.count)
+            app->hex_off = app->diff.range[0].start - HEX_COLS;
+        break;
+    }
+    hex_load(app);
+}
+
+static void input_hex(App *app, uint32_t k)
+{
+    long off = app->hex_off;
+    if (k & UI_KEY_UP)
+        off -= HEX_COLS;
+    if (k & UI_KEY_DOWN)
+        off += HEX_COLS;
+    if (k & UI_KEY_L)
+        off -= HEX_PAGE;
+    if (k & UI_KEY_R)
+        off += HEX_PAGE;
+    if (k & (UI_KEY_LEFT | UI_KEY_RIGHT))
+    {
+        int kept = app->diff.count < DIFF_MAX ? app->diff.count : DIFF_MAX;
+        if (app->hex_cmp_open && kept)
+        {
+            // Jump to the next or previous difference below the top row.
+            long top = off + HEX_COLS;
+            int i = save_diff_find(&app->diff, top);
+            if (k & UI_KEY_RIGHT)
+            {
+                while (i < kept && app->diff.range[i].start <= top)
+                    i++;
+                if (i < kept)
+                    off = app->diff.range[i].start - HEX_COLS;
+            }
+            else
+            {
+                i = i < kept ? i : kept;
+                while (i > 0 && app->diff.range[i - 1].start >= top)
+                    i--;
+                if (i > 0)
+                    off = app->diff.range[i - 1].start - HEX_COLS;
+            }
+        }
+        else
+            off += (k & UI_KEY_RIGHT) ? HEX_JUMP : -HEX_JUMP;
+    }
+    if (off != app->hex_off)
+    {
+        app->hex_off = off < 0 ? 0 : off;
+        hex_load(app);
+    }
+    if (k & UI_KEY_X)
+        queue(app, OP_HEX_COMPARE, "Comparing the saves");
+    else if (k & UI_KEY_B)
+        hex_close(app);
+}
+
 static void run_op(App *app, UiOp op)
 {
     Library *lib = app->lib;
@@ -887,6 +1024,29 @@ static void run_op(App *app, UiOp op)
                 result_status(app, r, "");
             break;
         }
+
+        case OP_HEX_OPEN:
+            if (!b)
+                break;
+            if (!savefile_open(&app->hex_r, b->file))
+            {
+                set_status(app, STATUS_ERROR, "Couldn't read this backup");
+                break;
+            }
+            app->hex_backup = app->hist_sel;
+            app->hex_size = savefile_size(b->file);
+            app->hex_off = 0;
+            app->hex_cmp_open = false;
+            app->hex_cmp = HEX_CMP_NONE;
+            memset(&app->diff, 0, sizeof(app->diff));
+            app->screen = SCREEN_HEX;
+            app->status[0] = '\0';
+            hex_load(app);
+            break;
+
+        case OP_HEX_COMPARE:
+            hex_next_compare(app);
+            break;
 
         case OP_USE_SLOT:
             if (!g || app->copy_sel < g->loc_count)
@@ -1215,6 +1375,9 @@ static void more_activate(App *app, int item)
         case MORE_KEEP:
             queue(app, OP_KEEP, b->keep ? "Clearing the Keep mark" : "Marking the backup Keep");
             break;
+        case MORE_HEX:
+            queue(app, OP_HEX_OPEN, "Opening the backup");
+            break;
         case MORE_TRASH:
             backup_label(b, label, sizeof(label));
             confirm(app, OP_TRASH, true, "Move to trash?",
@@ -1378,6 +1541,13 @@ static void layout_bottom(App *app, Ctls *ctls)
             return;
     }
 
+    if (app->screen == SCREEN_HEX)
+    {
+        add_ctl(ctls, 4, 3, pill_width("B", "Back"), 16, ID_BACK);
+        int w = pill_width("X", "Compare");
+        add_ctl(ctls, SCREEN_W - 4 - w, 3, w, 16, ID_ACT_X);
+        return;
+    }
     if (app->screen == SCREEN_MAIN)
     {
         add_ctl(ctls, 4, 3, pill_width("START", "Menu"), 16, ID_MENU);
@@ -1473,6 +1643,8 @@ static void activate(App *app, int id)
                 app->modal = MODAL_MENU;
             else if (app->modal == MODAL_MENU || app->modal == MODAL_IMPORT)
                 app->modal = MODAL_NONE;
+            else if (app->screen == SCREEN_HEX)
+                hex_close(app);
             else
                 act_close_copies(app);
             app->dirty = true;
@@ -1484,7 +1656,12 @@ static void activate(App *app, int id)
                 act_copy_here(app);
             break;
         case ID_ACT_B: act_restore(app); break;
-        case ID_ACT_X: act_compress(app); break;
+        case ID_ACT_X:
+            if (app->screen == SCREEN_HEX)
+                queue(app, OP_HEX_COMPARE, "Comparing the saves");
+            else
+                act_compress(app);
+            break;
         case ID_ACT_Y:
             if (app->screen == SCREEN_MAIN)
                 act_more(app);
@@ -1887,6 +2064,8 @@ void app_update(App *app, const UiInput *in)
         uint32_t k = (in->repeat & nav) | (in->down & ~nav);
         if (app->screen == SCREEN_MAIN)
             input_main(app, k);
+        else if (app->screen == SCREEN_HEX)
+            input_hex(app, k);
         else
             input_copies(app, k);
     }
@@ -2059,6 +2238,7 @@ static void draw_status(Canvas *c, const App *app)
     if (!text[0])
     {
         text = app->screen == SCREEN_COPIES ? "Up/Down choose a copy  \xc2\xb7  B back"
+               : app->screen == SCREEN_HEX  ? "Up/Down scroll  \xc2\xb7  L/R page  \xc2\xb7  X compare"
                                             : "L/R choose a backup  \xc2\xb7  SELECT copies";
         col = C_FAINT;
     }
@@ -2588,6 +2768,7 @@ static void draw_more(Canvas *c, const App *app, const Ctls *ctls)
         [MORE_NOTE] = b && b->note[0] ? "Edit note" : "Add a note",
         [MORE_KEEP] = b && b->keep ? "Stop keeping" : "Keep this backup",
         [MORE_TRASH] = "Move backup to trash",
+        [MORE_HEX] = "View in hex",
         [MORE_EXPORT_SAV] = "Export .sav",        [MORE_EXPORT_DSV] = "Export .dsv",
         [MORE_NEW] = "New backup with a name",    [MORE_IMPORT] = "Import a save\xe2\x80\xa6",
     };
@@ -2595,6 +2776,7 @@ static void draw_more(Canvas *c, const App *app, const Ctls *ctls)
     const char *hints[MORE_ITEMS] = {
         [MORE_KEEP] = b && b->keep ? "" : "never pruned",
         [MORE_TRASH] = b && b->keep ? "kept" : NULL,
+        [MORE_HEX] = "and compare",
         [MORE_EXPORT_SAV] = "melonDS, flashcarts",
         [MORE_EXPORT_DSV] = "DeSmuME, DraStic",
     };
@@ -2665,6 +2847,117 @@ static void draw_import(Canvas *c, const App *app, const Ctls *ctls)
     bool can = app->import_count && app->imports[app->import_sel].valid;
     draw_button(c, app, find_ctl(ctls, ID_DLG_OK), "A", "Import", can);
     draw_button(c, app, find_ctl(ctls, ID_DLG_CANCEL), "B", "Back", true);
+}
+
+// The label of what the hex viewer compares with.
+static void hex_cmp_label(const App *app, char *out, size_t n)
+{
+    if (app->hex_cmp == HEX_CMP_LIVE)
+        snprintf(out, n, "the current save");
+    else if (app->hex_cmp >= 0 && app->hex_cmp < app->backup_count)
+        backup_label(&app->backups[app->hex_cmp], out, n);
+    else
+        snprintf(out, n, "nothing");
+}
+
+static void draw_top_hex(Canvas *c, const App *app)
+{
+    const Game *g = cur_game((App *)app);
+    if (!g || app->hex_backup >= app->backup_count)
+        return;
+    const Backup *b = &app->backups[app->hex_backup];
+    char label[64], line[128], size[16];
+    backup_label(b, label, sizeof(label));
+    gfx_text_fit(c, &font_bold, 6, 24, SCREEN_W - 12, label, C_TEXT);
+    fmt_size(app->hex_size, size, sizeof(size));
+    snprintf(line, sizeof(line), "%s  \xc2\xb7  %s%s", g->title, size, b->compressed ? ", from .gz" : "");
+    gfx_text_fit(c, &font_small, 6, 41, SCREEN_W - 12, line, C_MUTED);
+
+    gfx_rrect(c, 4, 58, SCREEN_W - 8, STATUS_Y - 60, 6, C_PANEL);
+    char with[64];
+    hex_cmp_label(app, with, sizeof(with));
+    if (!app->hex_cmp_open)
+    {
+        gfx_text(c, &font_bold, 10, 61, "Not comparing", C_TEXT);
+        draw_wrapped(c, &font_small, 10, 80, SCREEN_W - 20,
+                     "Press X to compare with the current save, then with each other backup in turn. "
+                     "Bytes that differ are highlighted.",
+                     C_MUTED, 4);
+        return;
+    }
+    snprintf(line, sizeof(line), "Compared with %s", with);
+    gfx_text_fit(c, &font_bold, 10, 61, SCREEN_W - 20, line, C_TEXT);
+    const SaveDiff *d = &app->diff;
+    if (!d->count)
+    {
+        gfx_text(c, &font_small, 10, 79, "Identical (0xFF padding aside)", C_OK);
+        return;
+    }
+    snprintf(line, sizeof(line), "%d range%s differ%s, %ld byte%s", d->count, d->count == 1 ? "" : "s",
+             d->count == 1 ? "s" : "", d->changed, d->changed == 1 ? "" : "s");
+    gfx_text_fit(c, &font_small, 10, 79, SCREEN_W - 20, line, C_WARN);
+    gfx_text_right(c, &font_small, SCREEN_W - 10, 79, "\xe2\x86\x90/\xe2\x86\x92 jump", C_FAINT);
+
+    // The ranges around the one on screen.
+    int kept = d->count < DIFF_MAX ? d->count : DIFF_MAX;
+    int here = save_diff_find(d, app->hex_off);
+    int first = clampi(here - 2, 0, kept > 6 ? kept - 6 : 0);
+    for (int i = first, y = 95; i < kept && y < STATUS_Y - 12; i++, y += 13)
+    {
+        const DiffRange *r = &d->range[i];
+        bool on_screen = r->start < app->hex_off + HEX_PAGE && r->start + r->len > app->hex_off;
+        if (on_screen)
+            gfx_rrect(c, 7, y, SCREEN_W - 14, 13, 3, C_SELECT);
+        snprintf(line, sizeof(line), "0x%06lX", r->start);
+        gfx_text(c, &font_small, 12, y, line, on_screen ? C_TEXT : C_MUTED);
+        snprintf(line, sizeof(line), "%ld byte%s", r->len, r->len == 1 ? "" : "s");
+        gfx_text_right(c, &font_small, SCREEN_W - 12, y, line, on_screen ? C_TEXT : C_MUTED);
+    }
+}
+
+static void draw_bottom_hex(Canvas *c, const App *app, const Ctls *ctls)
+{
+    gfx_fill(c, 0, 0, SCREEN_W, HEADER_H, C_PANEL);
+    draw_pill(c, app, find_ctl(ctls, ID_BACK), "B", "Back");
+    draw_pill(c, app, find_ctl(ctls, ID_ACT_X), "X", "Compare");
+
+    static const char digits[] = "0123456789ABCDEF";
+    for (int row = 0; row < HEX_ROWS; row++)
+    {
+        int y = HEX_Y + row * HEX_ROW_H;
+        long at = app->hex_off + row * HEX_COLS;
+        if (at >= app->hex_size)
+            break;
+        char off[12];
+        snprintf(off, sizeof(off), "%06lX", at);
+        gfx_text_right(c, &font_small, HEX_BYTE_X - 6, y, off, C_FAINT);
+        for (int col = 0; col < HEX_COLS; col++)
+        {
+            int i = row * HEX_COLS + col;
+            if (i >= app->hex_got)
+                break;
+            uint8_t v = app->hex_buf[i];
+            bool diff = app->hex_cmp_open && v != app->hex_cbuf[i];
+            int x = HEX_BYTE_X + col * HEX_BYTE_W;
+            if (diff)
+                gfx_rrect(c, x - 2, y, HEX_BYTE_W - 2, HEX_ROW_H - 1, 2, gfx_mix(C_BG, C_WARN, 70));
+            char pair[3] = { digits[v >> 4], digits[v & 15], 0 };
+            gfx_text_center(c, &font_small, x - 2, y, HEX_BYTE_W - 2, pair,
+                            diff ? C_WARN : v == 0xFF || v == 0x00 ? C_FAINT : C_TEXT);
+            char ch[2] = { v >= 0x20 && v < 0x7F ? (char)v : '.', 0 };
+            gfx_text_center(c, &font_small, HEX_ASCII_X + col * HEX_ASCII_W, y, HEX_ASCII_W, ch,
+                            diff ? C_WARN : ch[0] == '.' ? C_FAINT : C_MUTED);
+        }
+    }
+    gfx_fill(c, 0, HEX_Y + HEX_ROWS * HEX_ROW_H + 1, SCREEN_W, 1, C_LINE);
+    char foot[64], size[16];
+    fmt_size(app->hex_size, size, sizeof(size));
+    long pct = app->hex_size > 0 ? app->hex_off * 100 / app->hex_size : 0;
+    snprintf(foot, sizeof(foot), "0x%06lX of %s  \xc2\xb7  %ld%%", app->hex_off, size, pct);
+    gfx_text(c, &font_small, 6, HEX_Y + HEX_ROWS * HEX_ROW_H + 4, foot, C_MUTED);
+    gfx_text_right(c, &font_small, SCREEN_W - 6, HEX_Y + HEX_ROWS * HEX_ROW_H + 4,
+                   app->hex_cmp_open ? "\xe2\x86\x90\xe2\x86\x92 change" : "\xe2\x86\x90\xe2\x86\x92 4 KB",
+                   C_FAINT);
 }
 
 static void draw_check(Canvas *c, const App *app, const Ctls *ctls)
@@ -2921,6 +3214,8 @@ bool app_render(App *app, Canvas *top, Canvas *bottom)
     draw_top_header(top, app);
     if (app->screen == SCREEN_COPIES)
         draw_top_copies(top, app);
+    else if (app->screen == SCREEN_HEX)
+        draw_top_hex(top, app);
     else
         draw_top_main(top, app);
     draw_status(top, app);
@@ -2936,6 +3231,8 @@ bool app_render(App *app, Canvas *top, Canvas *bottom)
     gfx_clear(bottom, C_BG);
     if (app->screen == SCREEN_COPIES)
         draw_bottom_copies(bottom, app, &base);
+    else if (app->screen == SCREEN_HEX)
+        draw_bottom_hex(bottom, app, &base);
     else
         draw_bottom_main(bottom, app, &base);
 

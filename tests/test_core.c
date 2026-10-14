@@ -18,6 +18,7 @@
 #include "../source/core/backup.h"
 #include "../source/core/cardsave.h"
 #include "../source/core/check.h"
+#include "../source/core/savediff.h"
 #include "../source/core/ini.h"
 #include "../source/core/kernel.h"
 #include "../source/core/library.h"
@@ -1643,6 +1644,45 @@ static void test_archive(void)
     CHECK(!file_exists(tmp));
 }
 
+static void test_save_diff(void)
+{
+    new_card();
+    make_save("a.sav", 64 * KB, 16 * KB, 71);
+    char a[DSAVE_PATH_MAX], b[DSAVE_PATH_MAX], gz[DSAVE_PATH_MAX];
+    p(a, "a.sav");
+    p(b, "b.sav");
+    p(gz, "b.sav.gz");
+    SaveDiff d;
+    CHECK(save_diff(a, a, &d) && d.count == 0 && d.changed == 0 && d.size_a == 64 * KB);
+
+    // Two nearby changes merge; a far one is separate.
+    savefile_copy_raw(a, b);
+    FILE *f = fopen(b, "r+b");
+    fseek(f, 100, SEEK_SET);
+    fputc(0x00, f);
+    fseek(f, 110, SEEK_SET);
+    fputc(0x00, f);
+    fseek(f, 40000, SEEK_SET);
+    fputc(0x00, f);
+    fclose(f);
+    CHECK(save_diff(a, b, &d) && d.count == 2 && d.changed >= 2 && d.changed <= 3);
+    CHECK(d.range[0].start == 100 && d.range[0].len == 11 && d.range[1].start == 40000 && d.range[1].len == 1);
+    CHECK(save_diff_find(&d, 0) == 0 && save_diff_find(&d, 111) == 1 && save_diff_find(&d, 40001) == 2);
+
+    // A .gz reads like its raw save; padding with 0xFF changes nothing.
+    CHECK(savefile_write_gz(b, gz, NULL, NULL));
+    CHECK(save_diff(a, gz, &d) && d.count == 2);
+    make_save("pad.sav", 512 * KB, 16 * KB, 71);
+    char pad[DSAVE_PATH_MAX];
+    p(pad, "pad.sav");
+    CHECK(save_diff(a, pad, &d) && d.count == 0 && d.size_b == 512 * KB);
+
+    // A missing file fails.
+    char none[DSAVE_PATH_MAX];
+    p(none, "none.sav");
+    CHECK(!save_diff(a, none, &d));
+}
+
 // ---------------------------------------------------------------------------
 // Game card saves, against a fake save chip
 
@@ -2363,6 +2403,7 @@ int main(void)
     test_activity();
     test_check_all();
     test_archive();
+    test_save_diff();
     test_icon();
     test_card_detect();
     test_card_write();

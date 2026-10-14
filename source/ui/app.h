@@ -19,10 +19,12 @@
 #include "../core/cardsave.h"
 #include "../core/check.h"
 #include "../core/library.h"
+#include "../core/savediff.h"
+#include "../core/savefile.h"
 #include "../core/sync.h"
 #include "gfx.h"
 
-#define APP_VERSION "0.4.0"
+#define APP_VERSION "0.5.0"
 
 #define SCREEN_W 256
 #define SCREEN_H 192
@@ -54,7 +56,17 @@ typedef struct {
 typedef enum {
     SCREEN_MAIN,
     SCREEN_COPIES, // Every kernel's copy of the save, plus save slots
+    SCREEN_HEX,    // A backup's bytes, optionally compared with another save
 } UiScreen;
+
+// The hex viewer shows HEX_COLS bytes a row, HEX_ROWS rows a page.
+#define HEX_COLS 8
+#define HEX_ROWS 11
+#define HEX_PAGE (HEX_COLS * HEX_ROWS)
+// What the hex viewer compares with: nothing, the game's current save, or
+// app->backups[hex_cmp].
+#define HEX_CMP_NONE (-2)
+#define HEX_CMP_LIVE (-1)
 
 typedef enum {
     MODAL_NONE,
@@ -108,6 +120,8 @@ typedef enum {
     OP_UNDO,          // Undo the selected restore in the activity log
     OP_CHECK,         // Verify every backup on the card
     OP_EXPORT_ALL,    // Every game's backups into one .zip
+    OP_HEX_OPEN,      // Open the selected backup in the hex viewer
+    OP_HEX_COMPARE,   // Compare it with the next save in turn
 } UiOp;
 
 typedef enum {
@@ -154,6 +168,16 @@ typedef struct {
 
     CheckReport check;
     int check_sel, check_scroll;
+
+    // Hex viewer
+    SaveReader hex_r, hex_cr;  // The backup, and what it's compared with
+    bool hex_cmp_open;
+    int hex_backup;            // Index into backups
+    int hex_cmp;               // HEX_CMP_NONE, HEX_CMP_LIVE or a backup index
+    long hex_size, hex_cmp_size, hex_off;
+    uint8_t hex_buf[HEX_PAGE], hex_cbuf[HEX_PAGE];
+    int hex_got;               // Bytes of hex_buf that are in the save
+    SaveDiff diff;
 
     char kb_text[BACKUP_NAME_MAX + 1];
     int kb_row, kb_col;

@@ -51,6 +51,10 @@ your game saves without a PC.
   `_DSavE/export/DSavE_<date>.zip` with each game's newest backup named after
   its ROM, ready for an emulator, or (Left/Right) every backup laid out as
   `_DSavE/saves` is, to move a whole library to another card.
+- **Shows a backup's bytes.** *View in hex* under Y opens a read-only hex
+  viewer. X compares it with the current save, then with each other backup
+  in turn: differing bytes are highlighted, the top screen lists the ranges
+  that differ, and Left/Right jump between them.
 - **Compresses backups if you want.** Compressed backups are standard gzip
   (`.sav.gz`), so `gunzip` or 7-Zip on a PC turns them back into a raw save.
 - **Imports and exports emulator saves**: melonDS, DeSmuME, DraStic, no$gba

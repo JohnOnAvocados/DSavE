@@ -413,9 +413,43 @@ static void test_main_flow(void)
     press(UI_KEY_B);
     CHECK(app.modal == MODAL_NONE);
 
-    // Export, then clear Keep and trash it.
+    // View it in hex, then compare: first with the current save, then with
+    // each other backup until one differs (the auto backup of the save that
+    // was played on).
     press(UI_KEY_Y);
     while (app.more_sel != 4)
+        press(UI_KEY_DOWN);
+    press(UI_KEY_A);
+    settle();
+    CHECK(app.screen == SCREEN_HEX && app.hex_got == HEX_PAGE && app.hex_off == 0 && !app.hex_cmp_open);
+    shot("09e_hex");
+    press(UI_KEY_R);
+    CHECK(app.hex_off == HEX_PAGE);
+    press(UI_KEY_UP);
+    CHECK(app.hex_off == HEX_PAGE - HEX_COLS);
+    press(UI_KEY_X);
+    settle();
+    CHECK(app.hex_cmp == HEX_CMP_LIVE && app.hex_cmp_open);
+    bool found_diff = app.diff.count > 0;
+    for (int i = 0; i < 6 && !found_diff && app.hex_cmp != HEX_CMP_NONE; i++)
+    {
+        press(UI_KEY_X);
+        settle();
+        found_diff = app.diff.count > 0;
+    }
+    CHECK(found_diff && app.diff.range[0].start == 0);
+    CHECK(app.hex_off == 0); // Shows the first difference
+    bool marked = false;
+    for (int i = 0; i < HEX_COLS; i++)
+        marked |= app.hex_buf[i] != app.hex_cbuf[i];
+    CHECK(marked);
+    shot("09f_hex_compare");
+    press(UI_KEY_B);
+    CHECK(app.screen == SCREEN_MAIN);
+
+    // Export, then clear Keep and trash it.
+    press(UI_KEY_Y);
+    while (app.more_sel != 5)
         press(UI_KEY_DOWN);
     press(UI_KEY_A);
     CHECK(status_ok() && strstr(app.status, "export"));
@@ -444,7 +478,7 @@ static void test_main_flow(void)
     press(UI_KEY_A);
     CHECK(app.modal == MODAL_HISTORY && app.act_count >= 5);
     CHECK(app.acts[0].kind == ACT_TRASH && app.acts[1].kind == ACT_EXPORT);
-    shot("09e_history");
+    shot("09g_history");
     int r = -1;
     for (int i = 0; i < app.act_count && r < 0; i++)
         r = app.acts[i].kind == ACT_RESTORE ? i : -1;
@@ -453,7 +487,7 @@ static void test_main_flow(void)
     CHECK(app.modal == MODAL_HISTORY);
     while (app.act_sel != r)
         press(UI_KEY_DOWN);
-    shot("09f_history_restore");
+    shot("09h_history_restore");
     press(UI_KEY_A);
     CHECK(app.modal == MODAL_CONFIRM && app.dlg_op == OP_UNDO);
     hold(UI_KEY_A, 70);
@@ -475,11 +509,11 @@ static void test_main_flow(void)
     // Check all backups: everything verifies.
     while (app.menu_sel != MENU_CHECK)
         press(UI_KEY_DOWN);
-    shot("09g_menu_check");
+    shot("09i_menu_check");
     press(UI_KEY_A);
     settle();
     CHECK(app.modal == MODAL_CHECK && app.check.issue_count == 0 && app.check.backups > 0 && status_ok());
-    shot("09h_check_ok");
+    shot("09j_check_ok");
     press(UI_KEY_B);
     CHECK(app.modal == MODAL_MENU);
     press(UI_KEY_B);
@@ -502,7 +536,7 @@ static void test_main_flow(void)
     settle();
     CHECK(app.modal == MODAL_CHECK && app.check.issue_count == 1);
     CHECK(app.check.issues[0].kind == CHECK_DAMAGED && strcmp(app.check.issues[0].name, victim.name) == 0);
-    shot("09i_check_damaged");
+    shot("09k_check_damaged");
     press(UI_KEY_A);
     CHECK(app.modal == MODAL_NONE && app.status_kind == STATUS_ERROR);
     CHECK(strcmp(app.backups[app.hist_sel].name, victim.name) == 0);
@@ -514,14 +548,14 @@ static void test_main_flow(void)
     CHECK(app.zip_mode == ARCHIVE_NEWEST);
     press(UI_KEY_RIGHT);
     CHECK(app.zip_mode == ARCHIVE_ALL);
-    shot("09j_menu_zip");
+    shot("09l_menu_zip");
     press(UI_KEY_A);
     settle();
     CHECK(app.status_kind == STATUS_ERROR && strstr(app.status, "1 damaged backup left out")); // Damaged above
     char zips[DSAVE_PATH_MAX];
     p(zips, "_DSavE/export");
     CHECK(dir_exists(zips));
-    shot("09k_zipped");
+    shot("09m_zipped");
     press(UI_KEY_B);
 }
 
@@ -650,9 +684,9 @@ static void test_import(void)
     // Y, "Import a save", lists the import folder.
     select_game("ATKE");
     press(UI_KEY_Y);
-    for (int i = 0; i < 8 && app.more_sel != 7; i++)
+    for (int i = 0; i < 9 && app.more_sel != 8; i++)
         press(UI_KEY_DOWN); // Skips the items that need a backup
-    CHECK(app.more_sel == 7);
+    CHECK(app.more_sel == 8);
     press(UI_KEY_A);
     CHECK(app.modal == MODAL_IMPORT && app.import_count == 3);
     shot("19_import");
@@ -679,7 +713,7 @@ static void test_import(void)
     // A .dsv named after Tetris goes into Tetris, though Kirby is selected.
     int kirby = app.game_sel;
     press(UI_KEY_Y);
-    for (int i = 0; i < 8 && app.more_sel != 7; i++)
+    for (int i = 0; i < 9 && app.more_sel != 8; i++)
         press(UI_KEY_DOWN);
     press(UI_KEY_A);
     CHECK(app.modal == MODAL_IMPORT && app.import_count == 3);
@@ -699,7 +733,7 @@ static void test_import(void)
     // Export it for DeSmuME: named after the ROM, footer added.
     press(UI_KEY_Y);
     CHECK(app.modal == MODAL_MORE);
-    for (int i = 0; i < 8 && app.more_sel != 5; i++)
+    for (int i = 0; i < 9 && app.more_sel != 6; i++)
         press(UI_KEY_DOWN);
     shot("21c_more_export");
     press(UI_KEY_A);
