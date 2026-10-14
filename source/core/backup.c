@@ -686,9 +686,7 @@ DsaveResult backup_trash(const Library *lib, const Game *game, const Backup *b)
     return rename(b->dir, target) == 0 ? DSAVE_OK : DSAVE_ERR_IO;
 }
 
-// The name an emulator looks for: the ROM's file name with the save's
-// extension. A game card has no ROM, so it gets its title and game code.
-static void export_stem(const Game *game, char *out, size_t size)
+void backup_export_stem(const Game *game, char *out, size_t size)
 {
     if (game->rom_path[0] && !game->is_card)
     {
@@ -714,7 +712,7 @@ DsaveResult backup_export(const Library *lib, const Game *game, const Backup *b,
         return DSAVE_ERR_PATH;
     if (!mkdir_p(dir))
         return DSAVE_ERR_IO;
-    export_stem(game, stem, sizeof(stem));
+    backup_export_stem(game, stem, sizeof(stem));
     snprintf(leaf, sizeof(leaf), "%s%s", stem, format == EXPORT_DSV ? ".dsv" : ".sav");
     if (!path_join(target, sizeof(target), dir, leaf) || !path_join(tmp, sizeof(tmp), dir, ".export.tmp"))
         return DSAVE_ERR_PATH;

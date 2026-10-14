@@ -14,6 +14,7 @@
 #include <stdint.h>
 
 #include "../core/activity.h"
+#include "../core/archive.h"
 #include "../core/backup.h"
 #include "../core/cardsave.h"
 #include "../core/check.h"
@@ -68,7 +69,17 @@ typedef enum {
 } UiModal;
 
 // START menu items
-enum { MENU_KERNEL, MENU_COMPRESS, MENU_KEEP_AUTO, MENU_HISTORY, MENU_CHECK, MENU_RESCAN, MENU_ABOUT, MENU_ITEMS };
+enum {
+    MENU_KERNEL,
+    MENU_COMPRESS,
+    MENU_KEEP_AUTO,
+    MENU_HISTORY,
+    MENU_CHECK,
+    MENU_ZIP,
+    MENU_RESCAN,
+    MENU_ABOUT,
+    MENU_ITEMS
+};
 
 // Work that touches the SD card. It is queued, the UI draws one frame saying
 // what it is doing, and then it runs.
@@ -96,6 +107,7 @@ typedef enum {
     OP_KEEP,          // Toggle the selected backup's Keep mark
     OP_UNDO,          // Undo the selected restore in the activity log
     OP_CHECK,         // Verify every backup on the card
+    OP_EXPORT_ALL,    // Every game's backups into one .zip
 } UiOp;
 
 typedef enum {
@@ -131,6 +143,7 @@ typedef struct {
     UiOp dlg_op;
 
     int menu_sel, more_sel;
+    ArchiveMode zip_mode; // What "Export all to .zip" puts in
 
     ImportFile imports[IMPORT_LIST_MAX];
     int import_count, import_sel, import_scroll;

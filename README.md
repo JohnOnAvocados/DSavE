@@ -47,6 +47,10 @@ your game saves without a PC.
   each backup's size and CRC-32, and lists damaged backups, ones without a
   `backup.ini`, unfinished or empty folders, and folders for games no longer
   on the card. It only reads.
+- **Exports everything as one .zip.** *Export all to .zip* in the menu writes
+  `_DSavE/export/DSavE_<date>.zip` with each game's newest backup named after
+  its ROM, ready for an emulator, or (Left/Right) every backup laid out as
+  `_DSavE/saves` is, to move a whole library to another card.
 - **Compresses backups if you want.** Compressed backups are standard gzip
   (`.sav.gz`), so `gunzip` or 7-Zip on a PC turns them back into a raw save.
 - **Imports and exports emulator saves**: melonDS, DeSmuME, DraStic, no$gba
