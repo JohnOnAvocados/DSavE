@@ -471,7 +471,41 @@ static void test_main_flow(void)
     CHECK(app.acts[0].kind == ACT_UNDO);
     press(UI_KEY_B);
     CHECK(app.modal == MODAL_MENU);
+
+    // Check all backups: everything verifies.
+    while (app.menu_sel != MENU_CHECK)
+        press(UI_KEY_DOWN);
+    shot("09g_menu_check");
+    press(UI_KEY_A);
+    settle();
+    CHECK(app.modal == MODAL_CHECK && app.check.issue_count == 0 && app.check.backups > 0 && status_ok());
+    shot("09h_check_ok");
     press(UI_KEY_B);
+    CHECK(app.modal == MODAL_MENU);
+    press(UI_KEY_B);
+
+    // Damage one backup: the check finds it, and A shows it in the list.
+    Backup victim = app.backups[app.backup_count - 1];
+    FILE *vf = fopen(victim.file, "r+b");
+    CHECK(vf != NULL);
+    if (vf)
+    {
+        fseek(vf, 10, SEEK_SET);
+        fputc(0x99, vf);
+        fclose(vf);
+    }
+    app.hist_sel = 0;
+    press(UI_KEY_START);
+    while (app.menu_sel != MENU_CHECK)
+        press(UI_KEY_DOWN);
+    press(UI_KEY_A);
+    settle();
+    CHECK(app.modal == MODAL_CHECK && app.check.issue_count == 1);
+    CHECK(app.check.issues[0].kind == CHECK_DAMAGED && strcmp(app.check.issues[0].name, victim.name) == 0);
+    shot("09i_check_damaged");
+    press(UI_KEY_A);
+    CHECK(app.modal == MODAL_NONE && app.status_kind == STATUS_ERROR);
+    CHECK(strcmp(app.backups[app.hist_sel].name, victim.name) == 0);
 }
 
 static void test_copies(void)

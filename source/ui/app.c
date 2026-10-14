@@ -62,6 +62,9 @@ enum { MORE_RENAME, MORE_NOTE, MORE_KEEP, MORE_TRASH, MORE_EXPORT_SAV, MORE_EXPO
 #define IMPORT_ROWS 5
 #define ACT_ROW_H 30
 #define ACT_ROWS 4
+#define CHECK_LIST_Y 42
+#define CHECK_ROW_H 25
+#define CHECK_ROWS 4
 
 // Choices for "Keep auto backups"; 0 keeps all.
 static const int keep_choices[] = { 5, 10, 20, 50, 0 };
@@ -528,6 +531,43 @@ static void history_choose(App *app)
             a->title, t);
 }
 
+static int check_rows(const App *app)
+{
+    return app->check.issue_count < CHECK_ISSUE_MAX ? app->check.issue_count : CHECK_ISSUE_MAX;
+}
+
+// Show the game and backup an issue is about.
+static void check_choose(App *app)
+{
+    if (app->check_sel >= check_rows(app))
+        return;
+    const CheckIssue *is = &app->check.issues[app->check_sel];
+    if (is->game < 0 || is->game >= app->lib->count)
+    {
+        set_status(app, STATUS_HINT, "No game on the card uses _DSavE/saves/%s", is->name);
+        return;
+    }
+    app->game_sel = is->game;
+    keep_visible(app->game_sel, &app->game_scroll, GAME_ROWS, app->lib->count);
+    app->backups_game = -1;
+    load_backups(app);
+    select_backup_named(app, is->name);
+    app->modal = MODAL_NONE;
+    app->dirty = true;
+    switch (is->kind)
+    {
+        case CHECK_DAMAGED:
+            set_status(app, STATUS_ERROR, "%s: %s", is->name, dsave_result_str(is->result));
+            break;
+        case CHECK_NO_META:
+            set_status(app, STATUS_HINT, "%s has no backup.ini, so its CRC can't be checked", is->name);
+            break;
+        default:
+            set_status(app, STATUS_HINT, "_DSavE/saves/.../%s has no save in it", is->name);
+            break;
+    }
+}
+
 static void run_op(App *app, UiOp op)
 {
     Library *lib = app->lib;
@@ -817,6 +857,19 @@ static void run_op(App *app, UiOp op)
             break;
         }
 
+        case OP_CHECK:
+            check_all(lib, &app->check, on_progress, app);
+            app->check_sel = app->check_scroll = 0;
+            app->modal = MODAL_CHECK;
+            if (app->check.issue_count)
+                set_status(app, STATUS_ERROR, "%d of %d backup%s OK; %d problem%s found", app->check.ok,
+                           app->check.backups, app->check.backups == 1 ? "" : "s", app->check.issue_count,
+                           app->check.issue_count == 1 ? "" : "s");
+            else
+                set_status(app, STATUS_OK, "All %d backup%s verified", app->check.backups,
+                           app->check.backups == 1 ? "" : "s");
+            break;
+
         case OP_USE_SLOT:
             if (!g || app->copy_sel < g->loc_count)
                 break;
@@ -1057,6 +1110,9 @@ static void menu_activate(App *app, int item)
         case MENU_HISTORY:
             open_history(app);
             break;
+        case MENU_CHECK:
+            queue(app, OP_CHECK, "Checking every backup");
+            break;
         case MENU_RESCAN:
             queue(app, OP_SCAN, "Scanning the SD card");
             break;
@@ -1278,6 +1334,13 @@ static void layout_bottom(App *app, Ctls *ctls)
             add_ctl(ctls, 4, BAR_Y + 23, BTN_W, BTN_H, ID_DLG_OK);
             add_ctl(ctls, 130, BAR_Y + 23, BTN_W, BTN_H, ID_DLG_CANCEL);
             return;
+        case MODAL_CHECK:
+            add_ctl(ctls, 4, 3, pill_width("B", "Back"), 16, ID_BACK);
+            for (int i = 0; i < CHECK_ROWS && app->check_scroll + i < check_rows(app); i++)
+                add_ctl(ctls, 0, CHECK_LIST_Y + i * CHECK_ROW_H, SCREEN_W, CHECK_ROW_H, ID_ITEM + i);
+            add_ctl(ctls, 4, BAR_Y + 23, BTN_W, BTN_H, ID_DLG_OK);
+            add_ctl(ctls, 130, BAR_Y + 23, BTN_W, BTN_H, ID_DLG_CANCEL);
+            return;
         case MODAL_KEYBOARD:
             add_ctl(ctls, 200, 5, 52, 20, ID_KB_CANCEL);
             for (int r = 0; r < 4; r++)
@@ -1341,6 +1404,15 @@ static void activate(App *app, int id)
             app->more_sel = item;
             more_activate(app, item);
         }
+        else if (app->modal == MODAL_CHECK)
+        {
+            // First tap selects, a second tap shows the backup.
+            int idx = clampi(app->check_scroll + item, 0, check_rows(app) - 1);
+            if (idx == app->check_sel)
+                check_choose(app);
+            app->check_sel = idx;
+            app->dirty = true;
+        }
         else if (app->modal == MODAL_HISTORY)
         {
             // First tap selects, a second tap offers the undo.
@@ -1376,7 +1448,7 @@ static void activate(App *app, int id)
         case ID_MENU: act_menu(app); break;
         case ID_COPIES: act_open_copies(app); break;
         case ID_BACK:
-            if (app->modal == MODAL_HISTORY)
+            if (app->modal == MODAL_HISTORY || app->modal == MODAL_CHECK)
                 app->modal = MODAL_MENU;
             else if (app->modal == MODAL_MENU || app->modal == MODAL_IMPORT)
                 app->modal = MODAL_NONE;
@@ -1405,13 +1477,17 @@ static void activate(App *app, int id)
                 import_choose(app);
             else if (app->modal == MODAL_HISTORY)
                 history_choose(app);
+            else if (app->modal == MODAL_CHECK)
+                check_choose(app);
             else if (!app->dlg_hold)
                 dialog_accept(app);
             break;
         case ID_DLG_CANCEL:
         case ID_KB_CANCEL:
         case ID_OUTSIDE:
-            app->modal = app->modal == MODAL_ABOUT || app->modal == MODAL_HISTORY ? MODAL_MENU : MODAL_NONE;
+            app->modal = app->modal == MODAL_ABOUT || app->modal == MODAL_HISTORY || app->modal == MODAL_CHECK
+                             ? MODAL_MENU
+                             : MODAL_NONE;
             app->dirty = true;
             break;
     }
@@ -1669,6 +1745,28 @@ static void input_modal(App *app, const UiInput *in)
                 app->dirty = true;
             }
             break;
+
+        case MODAL_CHECK:
+        {
+            int rows = check_rows(app), old = app->check_sel;
+            if (rows && (k & UI_KEY_UP))
+                app->check_sel = (app->check_sel + rows - 1) % rows;
+            if (rows && (k & UI_KEY_DOWN))
+                app->check_sel = (app->check_sel + 1) % rows;
+            if (app->check_sel != old)
+            {
+                keep_visible(app->check_sel, &app->check_scroll, CHECK_ROWS, rows);
+                app->dirty = true;
+            }
+            if (in->down & UI_KEY_A)
+                check_choose(app);
+            else if (in->down & UI_KEY_B)
+            {
+                app->modal = MODAL_MENU;
+                app->dirty = true;
+            }
+            break;
+        }
 
         case MODAL_HISTORY:
         {
@@ -2372,6 +2470,20 @@ static void draw_switch(Canvas *c, int x, int y, bool on)
     gfx_disc(c, on ? x + 13 : x + 1, y + 1, 12, C_WHITE);
 }
 
+// "On this card: Pico Launcher, TWiLight Menu++."
+static void kernels_found(const Library *lib, char *out, size_t n)
+{
+    char names[128];
+    KernelMask mask = 0;
+    for (int k = 0; k < KERNEL_COUNT; k++)
+    {
+        if (lib->kernels.cfg[k].installed)
+            mask |= KERNEL_BIT(k);
+    }
+    kernel_names(mask, names, sizeof(names));
+    snprintf(out, n, "On this card: %s.", names);
+}
+
 static void draw_menu(Canvas *c, const App *app, const Ctls *ctls)
 {
     const Library *lib = app->lib;
@@ -2383,6 +2495,7 @@ static void draw_menu(Canvas *c, const App *app, const Ctls *ctls)
     static const char *const items[MENU_ITEMS] = {
         [MENU_KERNEL] = "Kernel",           [MENU_COMPRESS] = "Compress new backups",
         [MENU_KEEP_AUTO] = "Keep auto backups", [MENU_HISTORY] = "Activity history",
+        [MENU_CHECK] = "Check all backups",
         [MENU_RESCAN] = "Rescan SD card",   [MENU_ABOUT] = "About DSavE",
     };
     for (int i = 0; i < MENU_ITEMS; i++)
@@ -2412,18 +2525,16 @@ static void draw_menu(Canvas *c, const App *app, const Ctls *ctls)
         }
     }
 
-    char found[160], names[128];
-    KernelMask mask = 0;
-    for (int k = 0; k < KERNEL_COUNT; k++)
+    // The kernels found, on the lines left under the items (About has them
+    // in full).
+    int y = MENU_Y + MENU_ITEMS * MENU_PITCH + 4;
+    int lines = (SCREEN_H - y - 2) / font_small.height;
+    if (lines > 0)
     {
-        if (lib->kernels.cfg[k].installed)
-            mask |= KERNEL_BIT(k);
+        char found[160];
+        kernels_found(lib, found, sizeof(found));
+        draw_wrapped(c, &font_small, 8, y, SCREEN_W - 16, found, C_FAINT, lines);
     }
-    kernel_names(mask, names, sizeof(names));
-    snprintf(found, sizeof(found),
-             "On this card: %s. The kernel decides where DSavE reads and writes each game's save.",
-             names);
-    draw_wrapped(c, &font_small, 8, MENU_Y + MENU_ITEMS * MENU_PITCH + 4, SCREEN_W - 16, found, C_FAINT, 3);
 }
 
 static void draw_more(Canvas *c, const App *app, const Ctls *ctls)
@@ -2522,6 +2633,73 @@ static void draw_import(Canvas *c, const App *app, const Ctls *ctls)
     gfx_text_fit(c, &font_small, 8, BAR_Y + 4, SCREEN_W - 16, into, C_FAINT);
     bool can = app->import_count && app->imports[app->import_sel].valid;
     draw_button(c, app, find_ctl(ctls, ID_DLG_OK), "A", "Import", can);
+    draw_button(c, app, find_ctl(ctls, ID_DLG_CANCEL), "B", "Back", true);
+}
+
+static void draw_check(Canvas *c, const App *app, const Ctls *ctls)
+{
+    const CheckReport *r = &app->check;
+    gfx_clear(c, C_BG);
+    gfx_fill(c, 0, 0, SCREEN_W, HEADER_H, C_PANEL);
+    draw_pill(c, app, find_ctl(ctls, ID_BACK), "B", "Back");
+    gfx_text_right(c, &font_small, SCREEN_W - 6, 4, "Check all backups", C_MUTED);
+
+    char sum[96];
+    snprintf(sum, sizeof(sum), "%d backup%s in %d game%s: %d OK", r->backups, r->backups == 1 ? "" : "s",
+             r->games, r->games == 1 ? "" : "s", r->ok);
+    gfx_text_fit(c, &font_body, 8, LIST_Y + 1, SCREEN_W - 16, sum, r->issue_count ? C_TEXT : C_OK);
+
+    if (!r->issue_count)
+        draw_wrapped(c, &font_small, 10, CHECK_LIST_Y + 4, SCREEN_W - 20,
+                     r->backups ? "Every backup matches the size and CRC-32 in its backup.ini, so each one "
+                                  "will restore exactly as it was saved."
+                                : "There are no backups on this card yet.",
+                     C_MUTED, 5);
+    int rows = check_rows(app);
+    for (int i = 0; i < CHECK_ROWS && app->check_scroll + i < rows; i++)
+    {
+        int idx = app->check_scroll + i;
+        const CheckIssue *is = &r->issues[idx];
+        int y = CHECK_LIST_Y + i * CHECK_ROW_H;
+        bool sel = idx == app->check_sel;
+        if (sel)
+            gfx_rrect(c, 3, y + 1, SCREEN_W - 10, CHECK_ROW_H - 2, 5, C_SELECT);
+        else if (pressed(app, ID_ITEM + i))
+            gfx_rrect(c, 3, y + 1, SCREEN_W - 10, CHECK_ROW_H - 2, 5, C_PANEL2);
+        Color kc = is->kind == CHECK_DAMAGED ? C_ERR : C_WARN;
+        int x = gfx_text(c, &font_small, 10, y + 1, check_kind_name(is->kind), kc);
+        const char *title = is->game >= 0 && is->game < app->lib->count ? app->lib->games[is->game].title : "";
+        gfx_text_fit(c, &font_small, x + 6, y + 1, SCREEN_W - 12 - x - 6, title, C_TEXT);
+        char label[64];
+        Backup named = { 0 };
+        snprintf(named.name, sizeof(named.name), "%s", is->name);
+        named.is_auto = strncmp(is->name, "auto_", 5) == 0;
+        if (is->kind == CHECK_DAMAGED || is->kind == CHECK_NO_META)
+            backup_label(&named, label, sizeof(label));
+        else
+            snprintf(label, sizeof(label), "%s", is->name);
+        gfx_text_fit(c, &font_small, 10, y + 12, SCREEN_W - 22, label, C_MUTED);
+    }
+    draw_scrollbar(c, SCREEN_W - 5, CHECK_LIST_Y + 1, CHECK_ROWS * CHECK_ROW_H - 2, app->check_scroll, CHECK_ROWS,
+                   rows);
+
+    gfx_fill(c, 0, BAR_Y - 3, SCREEN_W, SCREEN_H - BAR_Y + 3, C_PANEL);
+    const CheckIssue *is = rows ? &r->issues[app->check_sel] : NULL;
+    char hint[96];
+    if (!is)
+        snprintf(hint, sizeof(hint), "Nothing was changed");
+    else if (r->issue_count > CHECK_ISSUE_MAX)
+        snprintf(hint, sizeof(hint), "Showing the first %d of %d problems", CHECK_ISSUE_MAX, r->issue_count);
+    else if (is->kind == CHECK_DAMAGED)
+        snprintf(hint, sizeof(hint), "Restoring it is refused. Keep another backup");
+    else if (is->kind == CHECK_NO_META)
+        snprintf(hint, sizeof(hint), "Copied by hand? It restores, but unchecked");
+    else if (is->kind == CHECK_ORPHAN)
+        snprintf(hint, sizeof(hint), "Its ROM isn't on the card, or was renamed");
+    else
+        snprintf(hint, sizeof(hint), "Safe to delete from a PC");
+    gfx_text_fit(c, &font_small, 8, BAR_Y + 4, SCREEN_W - 16, hint, C_FAINT);
+    draw_button(c, app, find_ctl(ctls, ID_DLG_OK), "A", "Show", is && is->game >= 0);
     draw_button(c, app, find_ctl(ctls, ID_DLG_CANCEL), "B", "Back", true);
 }
 
@@ -2667,7 +2845,7 @@ static void draw_keyboard(Canvas *c, const App *app, const Ctls *ctls)
     gfx_text_center(c, &font_small, 0, 178, SCREEN_W, "START done  \xc2\xb7  SELECT cancel", C_FAINT);
 }
 
-static void draw_about(Canvas *c)
+static void draw_about(Canvas *c, const App *app)
 {
     dim(c);
     draw_box(c, 14, 14, 228, 164);
@@ -2678,8 +2856,12 @@ static void draw_about(Canvas *c)
                  C_TEXT, 4);
     draw_wrapped(c, &font_small, 24, 98, 208,
                  "GPLv3. Uses miniz (MIT) and DejaVu Sans. github.com/JohnOnAvocados/DSavE",
-                 C_MUTED, 3);
-    gfx_text(c, &font_small, 24, 160, "Press A or B to close", C_FAINT);
+                 C_MUTED, 2);
+    char found[200];
+    kernels_found(app->lib, found, sizeof(found));
+    strncat(found, " The kernel decides where each game's save is.", sizeof(found) - strlen(found) - 1);
+    draw_wrapped(c, &font_small, 24, 126, 208, found, C_MUTED, 3);
+    gfx_text(c, &font_small, 24, 164, "Press A or B to close", C_FAINT);
 }
 
 static void draw_busy(Canvas *c, const App *app)
@@ -2734,13 +2916,14 @@ bool app_render(App *app, Canvas *top, Canvas *bottom)
         case MODAL_MORE: draw_more(bottom, app, &modal); break;
         case MODAL_IMPORT: draw_import(bottom, app, &modal); break;
         case MODAL_HISTORY: draw_history(bottom, app, &modal); break;
+        case MODAL_CHECK: draw_check(bottom, app, &modal); break;
         case MODAL_KEYBOARD: draw_keyboard(bottom, app, &modal); break;
         case MODAL_ABOUT:
             app->modal = MODAL_MENU;
             layout_bottom(app, &modal);
             draw_menu(bottom, app, &modal);
             app->modal = MODAL_ABOUT;
-            draw_about(bottom);
+            draw_about(bottom, app);
             break;
     }
     if (app->pending != OP_NONE || app->running)
