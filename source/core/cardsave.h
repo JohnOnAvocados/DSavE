@@ -9,7 +9,7 @@
 //
 // The chip protocol follows GBATEK ("DS Cartridge Backup") and the save code
 // of GodMode9i and Pokedoc's savegame_manager (GPL-2.0-or-later). The bus is
-// supplied by the caller: the DS hardware in source/card_slot.c, or a fake
+// supplied by the caller: the DS hardware in source/platform/card_slot.c, or a fake
 // chip in the tests, so this file is plain C.
 
 #ifndef DSAVE_CARDSAVE_H
@@ -36,6 +36,10 @@ typedef struct {
     // Release chip select, ending the transaction.
     void (*deselect)(void *ctx);
     void (*wait_us)(void *ctx, unsigned us);
+    // Optional: false once the card has been pulled out. Long reads and
+    // writes check it so they stop at once instead of timing out on a card
+    // that is gone. NULL means "can't tell".
+    bool (*present)(void *ctx);
 } CardBus;
 
 typedef enum {

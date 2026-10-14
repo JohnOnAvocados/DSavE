@@ -77,12 +77,18 @@ static void send_command(CardBus *bus, const CardChip *chip, uint8_t cmd, uint32
         bus->transfer(bus->ctx, (uint8_t)(addr >> (i * 8)));
 }
 
+// True once the card is known to be out of the slot.
+static bool card_gone(CardBus *bus)
+{
+    return bus->present && !bus->present(bus->ctx);
+}
+
 static bool wait_ready(CardBus *bus, const CardChip *chip, unsigned timeout_ms)
 {
     begin(bus, chip->infrared);
     bus->transfer(bus->ctx, CMD_RDSR);
     bool ready = false;
-    for (unsigned polls = 0; polls <= timeout_ms * 20 && !ready; polls++)
+    for (unsigned polls = 0; polls <= timeout_ms * 20 && !ready && !card_gone(bus); polls++)
     {
         ready = !(bus->transfer(bus->ctx, 0) & SR_WIP);
         if (!ready)
@@ -489,18 +495,21 @@ static uint32_t chunk_len(const CardChip *chip, long off)
     return (uint32_t)(n < CHUNK ? n : CHUNK);
 }
 
-// CRC-32 of the whole chip.
-static uint32_t chip_crc(CardBus *bus, const CardChip *chip, Progress *pr)
+// CRC-32 of the whole chip. False if the card was pulled out meanwhile.
+static bool chip_crc(CardBus *bus, const CardChip *chip, Progress *pr, uint32_t *crc_out)
 {
     uint32_t crc = 0;
     for (long off = 0; off < chip->size; off += CHUNK)
     {
         uint32_t n = chunk_len(chip, off);
         card_chip_read(bus, chip, (uint32_t)off, chunk_a, n);
+        if (card_gone(bus))
+            return false;
         crc = crc32_update(crc, chunk_a, n);
         advance(pr, n);
     }
-    return crc;
+    *crc_out = crc;
+    return true;
 }
 
 // Copy the chip to a file, then read it again: both reads must agree.
@@ -509,19 +518,26 @@ static DsaveResult dump_chip(CardBus *bus, const CardChip *chip, const char *pat
     FILE *f = fopen(path, "wb");
     if (!f)
         return DSAVE_ERR_IO;
-    uint32_t crc = 0;
-    bool ok = true;
+    uint32_t crc = 0, again;
+    bool ok = true, gone = false;
     for (long off = 0; ok && off < chip->size; off += CHUNK)
     {
         uint32_t n = chunk_len(chip, off);
         card_chip_read(bus, chip, (uint32_t)off, chunk_a, n);
+        // A pulled card reads as all 0xFF twice over, which would pass the
+        // second read below and make a blank backup.
+        gone = card_gone(bus);
+        if (gone)
+            break;
         crc = crc32_update(crc, chunk_a, n);
         ok = fwrite(chunk_a, 1, n, f) == n;
         advance(pr, n);
     }
     if (fclose(f) != 0 || !ok)
-        return DSAVE_ERR_IO;
-    return chip_crc(bus, chip, pr) == crc ? DSAVE_OK : DSAVE_ERR_CARD;
+        return gone ? DSAVE_ERR_CARD_CHANGED : DSAVE_ERR_IO;
+    if (gone || !chip_crc(bus, chip, pr, &again))
+        return DSAVE_ERR_CARD_CHANGED;
+    return again == crc ? DSAVE_OK : DSAVE_ERR_CARD;
 }
 
 static bool temp_path(const Library *lib, char *out, size_t size)
@@ -580,6 +596,8 @@ static DsaveResult write_chip(CardBus *bus, const CardChip *chip, const char *pa
         card_chip_read(bus, chip, (uint32_t)off, chunk_b, n);
         if (memcmp(chunk_a, chunk_b, n) != 0 && !card_chip_write(bus, chip, (uint32_t)off, chunk_a, n))
             r = DSAVE_ERR_CARD;
+        if (card_gone(bus))
+            r = DSAVE_ERR_CARD_CHANGED;
         advance(pr, n);
     }
     savefile_close(&in);
@@ -624,12 +642,16 @@ DsaveResult card_restore(const Library *lib, CardSlot *slot, Game *card, const B
         *auto_backup = safety;
     backup_prune_auto(lib, card, lib->keep_auto, safety.name);
 
-    uint32_t want;
+    uint32_t want, got;
     r = write_chip(bus, chip, b->file, &want, &pr);
-    if (r == DSAVE_OK && chip_crc(bus, chip, &pr) == want)
+    if (r == DSAVE_OK && chip_crc(bus, chip, &pr, &got) && got == want)
         return DSAVE_OK;
 
+    // Put the old save back, and say so only if it reads back right. A card
+    // that was pulled out can't be put back; the auto backup holds its save.
     Progress again = { NULL, 0, 0 };
-    write_chip(bus, chip, safety.file, &want, &again);
-    return DSAVE_ERR_ROLLED_BACK;
+    if (!card_gone(bus) && write_chip(bus, chip, safety.file, &want, &again) == DSAVE_OK &&
+        chip_crc(bus, chip, &again, &got) && got == want)
+        return DSAVE_ERR_ROLLED_BACK;
+    return DSAVE_ERR_ROLLBACK_FAILED;
 }

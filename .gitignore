@@ -1,6 +1,38 @@
+# BlocksDS build output (make)
 build/
 *.nds
 *.elf
+*.map
+*.o
+*.d
+
+# Host tests (make -C tests)
 tests/test_core
 tests/test_ui
 tests/screenshots/
+*.dSYM/
+
+# Save files from testing: keep real saves out of the repository
+*.sav
+*.sav.gz
+*.dsv
+*.duc
+*.dss
+_DSavE/
+
+# Font tool (tools/make_font.py)
+__pycache__/
+*.pyc
+
+# Editors and IDEs
+.vscode/
+.idea/
+.cache/
+compile_commands.json
+*.swp
+*~
+
+# Operating systems
+.DS_Store
+Thumbs.db
+desktop.ini

@@ -72,6 +72,8 @@ static void fake_deselect(void *ctx)
     if (!c->selected)
         return;
     c->selected = false;
+    if (c->removed)
+        return;
     bool started = c->pos > 0 && (!c->infrared || c->ir_open);
     if (!started || c->wip > 0)
         return;
@@ -105,10 +107,18 @@ static void fake_deselect(void *ctx)
     }
 }
 
+static void maybe_remove(FakeCard *c)
+{
+    if ((c->remove_after_erases > 0 && c->erases >= c->remove_after_erases) ||
+        (c->remove_after_reads > 0 && c->reads >= c->remove_after_reads))
+        c->removed = true;
+}
+
 static uint8_t fake_transfer(void *ctx, uint8_t out)
 {
     FakeCard *c = ctx;
-    if (!c->selected || c->type == FAKE_NONE)
+    maybe_remove(c);
+    if (!c->selected || c->type == FAKE_NONE || c->removed)
         return 0xFF;
     if (c->infrared && !c->ir_open)
     {
@@ -175,8 +185,15 @@ static uint8_t fake_transfer(void *ctx, uint8_t out)
 
 static void fake_wait(void *ctx, unsigned us)
 {
-    (void)ctx;
-    (void)us;
+    FakeCard *c = ctx;
+    c->waited_us += us;
+}
+
+static bool fake_present(void *ctx)
+{
+    FakeCard *c = ctx;
+    maybe_remove(c);
+    return !c->removed;
 }
 
 static CardStatus fake_open(void *ctx, uint8_t *header, uint32_t *rom_id)
@@ -186,6 +203,8 @@ static CardStatus fake_open(void *ctx, uint8_t *header, uint32_t *rom_id)
     c->selected = false;
     c->wel = false;
     c->wip = 0;
+    if (c->removed)
+        return CARD_EMPTY;
     if (c->slot_status != CARD_READY)
         return c->slot_status;
     memcpy(header, c->header, CARD_HEADER_SIZE);
@@ -202,4 +221,5 @@ void fake_card_slot(FakeCard *c, CardSlot *slot)
     slot->bus.transfer = fake_transfer;
     slot->bus.deselect = fake_deselect;
     slot->bus.wait_us = fake_wait;
+    slot->bus.present = fake_present;
 }

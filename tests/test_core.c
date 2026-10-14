@@ -8,6 +8,8 @@
 #include <string.h>
 #include <unistd.h>
 #include <dirent.h>
+#include <signal.h>
+#include <sys/resource.h>
 
 #include "../source/core/backup.h"
 #include "../source/core/cardsave.h"
@@ -1785,6 +1787,106 @@ static long nocash_file(const uint8_t *data, long n, int method, bool count_firs
     return 0x50 + packed;
 }
 
+// A card pulled out mid-operation: DSavE must stop, say so, and never claim
+// the old save was put back when it wasn't.
+static void test_card_pulled(void)
+{
+    new_card();
+    make_dir("_pico");
+    make_rom("roms/HG.nds", "POKEMON HG", "IPKE", "Pokemon HeartGold");
+    library_scan(&lib, root);
+    fake_card_init(&fc, "IPKE", "POKEMON HG", FAKE_FLASH, 512 * KB, 0x204013, true);
+    fake_card_slot(&fc, &slot);
+    fill_chip(512 * KB, 5);
+    CardInfo card;
+    card_probe(&slot, &card);
+    card_add_to_library(&lib, &card);
+    Game *g = &lib.games[0];
+    Backup b;
+    CHECK(card_backup(&lib, &slot, g, "keep", false, &b, NULL) == DSAVE_OK);
+
+    // Pulled right after the first sector erase of a restore.
+    fill_chip(512 * KB, 7);
+    fc.waited_us = 0;
+    fc.remove_after_erases = fc.erases + 1;
+    Backup safety;
+    CHECK(card_restore(&lib, &slot, g, &b, &safety, NULL) == DSAVE_ERR_ROLLBACK_FAILED);
+    CHECK(fc.waited_us < 1000000); // Stops at once, not after the chip timeouts
+    CHECK(safety.is_auto);
+    fc.removed = false;
+    fc.remove_after_erases = 0;
+    fill_chip(512 * KB, 7);
+    CHECK(safety.crc32 == crc32_update(0, fc.mem, 512 * KB)); // The auto backup holds the old save
+
+    // Pulled after the slot was re-opened but before the save was read: not
+    // a "blank save", and no backup is made.
+    Backup list[BACKUP_LIST_MAX];
+    int before = backup_list(&lib, g, list, BACKUP_LIST_MAX);
+    fc.remove_after_reads = fc.reads + 1;
+    CHECK(card_backup(&lib, &slot, g, "pulled", false, NULL, NULL) == DSAVE_ERR_CARD_CHANGED);
+    fc.removed = false;
+    fc.remove_after_reads = fc.reads + 1;
+    CHECK(card_backup(&lib, &slot, g, "pulled", true, NULL, NULL) == DSAVE_ERR_CARD_CHANGED);
+    fc.removed = false;
+    fc.remove_after_reads = 0;
+    CHECK(backup_list(&lib, g, list, BACKUP_LIST_MAX) == before);
+    char tmp[DSAVE_PATH_MAX];
+    p(tmp, "_DSavE/.card.tmp");
+    CHECK(!file_exists(tmp));
+
+    // A chip that ignores writes still holds its old save, and says so.
+    fill_chip(512 * KB, 7);
+    fc.protect = true;
+    CHECK(card_restore(&lib, &slot, g, &b, NULL, NULL) == DSAVE_ERR_ROLLED_BACK);
+    fc.protect = false;
+}
+
+static void limit_file_size(rlim_t n)
+{
+    struct rlimit rl;
+    getrlimit(RLIMIT_FSIZE, &rl);
+    rl.rlim_cur = n;
+    setrlimit(RLIMIT_FSIZE, &rl);
+}
+
+// The SD card fills up partway through a restore.
+static void test_restore_disk_full(void)
+{
+    signal(SIGXFSZ, SIG_IGN);
+    new_card();
+    make_dir("_pico");
+    make_rom("roms/G.nds", "GAME", "ABCE", "Game");
+    make_rom("roms/H.nds", "GAME2", "ABDE", "Game 2");
+    make_save("roms/G.sav", 256 * KB, 256 * KB, 1);
+    make_save("other/big.sav", 512 * KB, 512 * KB, 2);
+    library_scan(&lib, root);
+    char big[DSAVE_PATH_MAX], live[DSAVE_PATH_MAX], fresh[DSAVE_PATH_MAX];
+    p(big, "other/big.sav");
+    p(live, "roms/G.sav");
+    p(fresh, "roms/H.sav");
+    uint32_t old_crc = crc_of(live);
+
+    // A bigger backup over a smaller save: the old save comes back at its
+    // old size, not with the new data hanging off the end.
+    Game *g = find_game("ABCE");
+    Backup b, safety;
+    CHECK(backup_create_from(&lib, g, big, "big", false, &b) == DSAVE_OK);
+    limit_file_size(400 * KB);
+    CHECK(backup_restore(&lib, g, &b, &safety) == DSAVE_ERR_ROLLED_BACK);
+    limit_file_size(RLIM_INFINITY);
+    CHECK(file_size(live) == 256 * KB && crc_of(live) == old_crc);
+
+    // A first save that doesn't fit leaves nothing for the kernel to load.
+    Game *h = find_game("ABDE");
+    Backup hb;
+    CHECK(backup_create_from(&lib, h, big, "big", false, &hb) == DSAVE_OK);
+    limit_file_size(100 * KB);
+    CHECK(backup_restore(&lib, h, &hb, &safety) == DSAVE_ERR_IO);
+    limit_file_size(RLIM_INFINITY);
+    CHECK(!file_exists(fresh) && !h->has_save);
+    CHECK(backup_restore(&lib, h, &hb, &safety) == DSAVE_OK && crc_of(fresh) == crc_of(big));
+}
+
 static void test_emulator_formats(void)
 {
     new_card();
@@ -1961,6 +2063,8 @@ int main(void)
     test_card_write();
     test_card_probe();
     test_card_backup_restore();
+    test_card_pulled();
+    test_restore_disk_full();
 
     library_free(&lib);
     remove_tree(tmpl);
