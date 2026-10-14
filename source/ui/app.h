@@ -16,6 +16,7 @@
 #include "../core/activity.h"
 #include "../core/backup.h"
 #include "../core/cardsave.h"
+#include "../core/check.h"
 #include "../core/library.h"
 #include "../core/sync.h"
 #include "gfx.h"
@@ -63,10 +64,11 @@ typedef enum {
     MODAL_ABOUT,
     MODAL_IMPORT,   // Files in _DSavE/import
     MODAL_HISTORY,  // The activity log, with undo
+    MODAL_CHECK,    // What "Check all backups" found
 } UiModal;
 
 // START menu items
-enum { MENU_KERNEL, MENU_COMPRESS, MENU_KEEP_AUTO, MENU_HISTORY, MENU_RESCAN, MENU_ABOUT, MENU_ITEMS };
+enum { MENU_KERNEL, MENU_COMPRESS, MENU_KEEP_AUTO, MENU_HISTORY, MENU_CHECK, MENU_RESCAN, MENU_ABOUT, MENU_ITEMS };
 
 // Work that touches the SD card. It is queued, the UI draws one frame saying
 // what it is doing, and then it runs.
@@ -93,6 +95,7 @@ typedef enum {
     OP_NOTE,          // Set the selected backup's note from the keyboard
     OP_KEEP,          // Toggle the selected backup's Keep mark
     OP_UNDO,          // Undo the selected restore in the activity log
+    OP_CHECK,         // Verify every backup on the card
 } UiOp;
 
 typedef enum {
@@ -135,6 +138,9 @@ typedef struct {
 
     Activity acts[ACTIVITY_LIST_MAX];
     int act_count, act_sel, act_scroll;
+
+    CheckReport check;
+    int check_sel, check_scroll;
 
     char kb_text[BACKUP_NAME_MAX + 1];
     int kb_row, kb_col;

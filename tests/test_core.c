@@ -14,6 +14,7 @@
 #include "../source/core/activity.h"
 #include "../source/core/backup.h"
 #include "../source/core/cardsave.h"
+#include "../source/core/check.h"
 #include "../source/core/ini.h"
 #include "../source/core/kernel.h"
 #include "../source/core/library.h"
@@ -1465,6 +1466,78 @@ static void test_activity(void)
     CHECK(n == ACTIVITY_LIST_MAX && acts[0].crc32 == 699 && acts[ACTIVITY_LIST_MAX - 1].crc32 == 699 - (ACTIVITY_LIST_MAX - 1));
 }
 
+static void count_calls(void *ctx, long done, long total)
+{
+    (void)done;
+    (void)total;
+    (*(long *)ctx)++;
+}
+
+static void test_check_all(void)
+{
+    new_card();
+    make_dir("_pico");
+    make_rom("Game.nds", "GAME", "ABCE", NULL);
+    make_rom("Other.nds", "OTHER", "ABDE", NULL);
+    make_save("Game.sav", 64 * KB, 16 * KB, 71);
+    make_save("Other.sav", 8 * KB, 4 * KB, 72);
+    library_scan(&lib, root);
+    Game *g = find_game("ABCE"), *o = find_game("ABDE");
+    if (!g || !o)
+        return;
+
+    CheckReport rep;
+    check_all(&lib, &rep, NULL, NULL);
+    CHECK(rep.games == 0 && rep.backups == 0 && rep.issue_count == 0);
+
+    Backup a, b, c;
+    CHECK(backup_create(&lib, g, "good", false, &a) == DSAVE_OK);
+    CHECK(backup_create(&lib, g, "bad", false, &b) == DSAVE_OK);
+    CHECK(backup_create(&lib, o, "fine", false, &c) == DSAVE_OK);
+    long calls = 0;
+    check_all(&lib, &rep, count_calls, &calls);
+    CHECK(rep.games == 2 && rep.backups == 3 && rep.ok == 3 && rep.issue_count == 0 && calls > 0);
+
+    // Flip a byte: damaged. Drop a backup.ini: can't verify.
+    FILE *f = fopen(b.file, "r+b");
+    fseek(f, 100, SEEK_SET);
+    fputc(0x5A, f);
+    fclose(f);
+    char ini[DSAVE_PATH_MAX];
+    path_join(ini, sizeof(ini), c.dir, "backup.ini");
+    remove(ini);
+    // An empty backup folder, an unfinished one, and a game that's gone.
+    char gdir[DSAVE_PATH_MAX], extra[DSAVE_PATH_MAX];
+    backup_game_dir(&lib, g, gdir, sizeof(gdir));
+    path_join(extra, sizeof(extra), gdir, "empty");
+    mkdir_p(extra);
+    path_join(extra, sizeof(extra), gdir, ".tmp_crashed");
+    mkdir_p(extra);
+    make_dir("_DSavE/saves/ZZZE Gone Game/old");
+
+    check_all(&lib, &rep, NULL, NULL);
+    CHECK(rep.games == 2 && rep.backups == 3 && rep.ok == 1 && rep.issue_count == 5);
+    int seen[5] = { 0 };
+    for (int i = 0; i < rep.issue_count; i++)
+    {
+        const CheckIssue *is = &rep.issues[i];
+        seen[is->kind]++;
+        if (is->kind == CHECK_DAMAGED)
+            CHECK(strcmp(is->name, "bad") == 0 && is->result == DSAVE_ERR_CORRUPT && &lib.games[is->game] == g);
+        if (is->kind == CHECK_NO_META)
+            CHECK(strcmp(is->name, "fine") == 0 && &lib.games[is->game] == o);
+        if (is->kind == CHECK_NO_SAVE)
+            CHECK(strcmp(is->name, "empty") == 0);
+        if (is->kind == CHECK_LEFTOVER)
+            CHECK(strcmp(is->name, ".tmp_crashed") == 0);
+        if (is->kind == CHECK_ORPHAN)
+            CHECK(strcmp(is->name, "ZZZE Gone Game") == 0 && is->game == -1);
+    }
+    CHECK(seen[CHECK_DAMAGED] == 1 && seen[CHECK_NO_META] == 1 && seen[CHECK_NO_SAVE] == 1 &&
+          seen[CHECK_LEFTOVER] == 1 && seen[CHECK_ORPHAN] == 1);
+    CHECK(strcmp(check_kind_name(CHECK_DAMAGED), "Damaged") == 0);
+}
+
 // ---------------------------------------------------------------------------
 // Game card saves, against a fake save chip
 
@@ -2183,6 +2256,7 @@ int main(void)
     test_prune_auto();
     test_note_and_keep();
     test_activity();
+    test_check_all();
     test_icon();
     test_card_detect();
     test_card_write();
