@@ -169,6 +169,28 @@ static uint32_t crc_of_rel(const char *rel)
     return crc_of(path);
 }
 
+static uint32_t le32(const uint8_t *b)
+{
+    return (uint32_t)b[0] | ((uint32_t)b[1] << 8) | ((uint32_t)b[2] << 16) | ((uint32_t)b[3] << 24);
+}
+
+static void put_le32(uint8_t *b, uint32_t v)
+{
+    for (int i = 0; i < 4; i++)
+        b[i] = (uint8_t)(v >> (8 * i));
+}
+
+static void write_bytes(const char *rel, const uint8_t *data, long n)
+{
+    char path[DSAVE_PATH_MAX], dir[DSAVE_PATH_MAX];
+    p(path, rel);
+    path_dirname(dir, sizeof(dir), path);
+    mkdir_p(dir);
+    FILE *f = fopen(path, "wb");
+    fwrite(data, 1, (size_t)n, f);
+    fclose(f);
+}
+
 // CRC of the first n bytes of path.
 static uint32_t crc_prefix(const char *path, long n)
 {
@@ -552,11 +574,38 @@ static void test_backup_cycle(void)
         found |= strcmp(list[i].name, "Clean copy") == 0;
     CHECK(found);
 
-    // Export writes an exact-size raw copy.
+    // Export writes an exact-size raw copy named after the ROM, replacing
+    // an earlier export.
     char exported[DSAVE_PATH_MAX];
-    CHECK(backup_export(&lib, ct, &b1, exported, sizeof(exported)) == DSAVE_OK);
-    CHECK(path_is(exported, "_DSavE/export/CHRONO TRIGGER_YQUE_Before final boss.sav"));
+    CHECK(backup_export(&lib, ct, &b1, EXPORT_SAV, exported, sizeof(exported)) == DSAVE_OK);
+    CHECK(backup_export(&lib, ct, &b1, EXPORT_SAV, exported, sizeof(exported)) == DSAVE_OK);
+    CHECK(path_is(exported, "_DSavE/export/Chrono Trigger.sav"));
     CHECK(file_size(exported) == 64 * KB && crc_of(exported) == original);
+
+    // .dsv: the same data, then DeSmuME's footer for EEPROM 512kbit.
+    CHECK(backup_export(&lib, ct, &b1, EXPORT_DSV, exported, sizeof(exported)) == DSAVE_OK);
+    CHECK(path_is(exported, "_DSavE/export/Chrono Trigger.dsv"));
+    CHECK(crc_prefix(exported, 64 * KB) == original);
+    {
+        static const char marker[] =
+            "|<--Snip above here to create a raw sav by excluding this DeSmuME savedata footer:";
+        long footer = (long)strlen(marker) + 24 + 16;
+        CHECK(file_size(exported) == 64 * KB + footer);
+        uint8_t tail[256];
+        FILE *f = fopen(exported, "rb");
+        CHECK(f && fseek(f, 64 * KB, SEEK_SET) == 0 && fread(tail, 1, (size_t)footer, f) == (size_t)footer);
+        if (f)
+            fclose(f);
+        const uint8_t *fields = tail + strlen(marker);
+        CHECK(memcmp(tail, marker, strlen(marker)) == 0);
+        CHECK(le32(fields) == 64 * KB && le32(fields + 4) == 64 * KB); // Size, padded size
+        CHECK(le32(fields + 8) == 3 && le32(fields + 12) == 2);        // EEPROM 512kbit, 2 address bytes
+        CHECK(le32(fields + 16) == 64 * KB && le32(fields + 20) == 0); // Memory size, version
+        CHECK(memcmp(fields + 24, "|-DESMUME SAVE-|", 16) == 0);
+    }
+    char leftover[DSAVE_PATH_MAX];
+    p(leftover, "_DSavE/export/.export.tmp");
+    CHECK(!file_exists(leftover));
 
     // Trash moves instead of deleting.
     CHECK(backup_trash(&lib, ct, &b3) == DSAVE_OK);
@@ -694,7 +743,7 @@ static void test_export_trim(void)
     CHECK(backup_create(&lib, ct, "padded", false, &b) == DSAVE_OK);
     CHECK(b.size == 512 * KB); // Backups keep the file exactly as it was
     char out[DSAVE_PATH_MAX];
-    CHECK(backup_export(&lib, ct, &b, out, sizeof(out)) == DSAVE_OK);
+    CHECK(backup_export(&lib, ct, &b, EXPORT_SAV, out, sizeof(out)) == DSAVE_OK);
     CHECK(file_size(out) == 64 * KB);
     CHECK(crc_of(out) == crc_prefix(ct->save_path, 64 * KB));
 
@@ -702,7 +751,7 @@ static void test_export_trim(void)
     make_save("Chrono Trigger.sav", 512 * KB, 100 * KB, 7);
     library_refresh_game(&lib, ct);
     CHECK(backup_create(&lib, ct, "odd", false, &b) == DSAVE_OK);
-    CHECK(backup_export(&lib, ct, &b, out, sizeof(out)) == DSAVE_OK);
+    CHECK(backup_export(&lib, ct, &b, EXPORT_SAV, out, sizeof(out)) == DSAVE_OK);
     CHECK(file_size(out) == 512 * KB);
 }
 
@@ -964,7 +1013,7 @@ static void test_compression(void)
     CHECK(backup_restore(&lib, g, &list[0], &safety) == DSAVE_OK);
     CHECK(crc_of(g->save_path) == live && safety.compressed);
     char exported[DSAVE_PATH_MAX];
-    CHECK(backup_export(&lib, g, &list[0], exported, sizeof(exported)) == DSAVE_OK);
+    CHECK(backup_export(&lib, g, &list[0], EXPORT_SAV, exported, sizeof(exported)) == DSAVE_OK);
     CHECK(has_ext(exported, ".sav") && crc_of(exported) == live);
 
     // Decompress and compress again in place.
@@ -1126,7 +1175,7 @@ static void test_import(void)
     CHECK(n == 5); // Not the .txt
     CHECK(n == 5 && strcmp(files[0].name, "emu.dsv") == 0 && files[0].size == 8 * KB && files[0].valid);
     CHECK(n == 5 && strcmp(files[1].name, "From PC.sav") == 0 && files[1].valid);
-    CHECK(n == 5 && strcmp(files[2].name, "nocash.sav") == 0 && !files[2].valid);
+    CHECK(n == 5 && strcmp(files[2].name, "nocash.sav") == 0 && !files[2].valid && files[2].format == EMU_NOCASH);
     CHECK(n == 5 && strcmp(files[3].name, "odd.sav") == 0 && !files[3].valid);
     CHECK(n == 5 && strcmp(files[4].name, "packed.sav.gz") == 0 && files[4].size == 512 * KB);
     if (n != 5)
@@ -1143,7 +1192,7 @@ static void test_import(void)
     CHECK(!file_exists(tmp));
     CHECK(backup_import(&lib, g, files[4].path, &b) == DSAVE_OK);
     CHECK(strcmp(b.name, "import_packed") == 0 && b.crc32 == packed);
-    CHECK(backup_import(&lib, g, files[2].path, &b) == DSAVE_ERR_UNSUPPORTED);
+    CHECK(backup_import(&lib, g, files[2].path, &b) == DSAVE_ERR_DAMAGED); // Header cut short
     CHECK(backup_import(&lib, g, files[3].path, &b) == DSAVE_ERR_BAD_SIZE);
 
     // backup.ini names the original file, and the backup restores.
@@ -1563,6 +1612,217 @@ static void test_card_backup_restore(void)
     CHECK(crc32_update(0, fc.mem, 8 * KB) == crc_of(imp));
 }
 
+// no$gba's run-length packing, written the way no$gba does: long runs as
+// 80 with a 16-bit count, short runs as 81..FF, the rest copied. count_first
+// writes the 80 run's count before its byte, as older readers expect.
+static long nocash_pack(const uint8_t *in, long n, uint8_t *out, bool count_first)
+{
+    long o = 0, i = 0, lit = -1;
+    while (i < n)
+    {
+        long run = 1;
+        while (i + run < n && in[i + run] == in[i] && run < 0xFFFF)
+            run++;
+        if (run >= 3)
+        {
+            lit = -1;
+            if (run > 0x7F)
+            {
+                out[o++] = 0x80;
+                if (count_first)
+                {
+                    out[o++] = (uint8_t)run;
+                    out[o++] = (uint8_t)(run >> 8);
+                    out[o++] = in[i];
+                }
+                else
+                {
+                    out[o++] = in[i];
+                    out[o++] = (uint8_t)run;
+                    out[o++] = (uint8_t)(run >> 8);
+                }
+            }
+            else
+            {
+                out[o++] = (uint8_t)(0x80 + run);
+                out[o++] = in[i];
+            }
+            i += run;
+            continue;
+        }
+        if (lit < 0 || out[lit] == 0x7F)
+        {
+            lit = o;
+            out[o++] = 0;
+        }
+        out[lit]++;
+        out[o++] = in[i++];
+    }
+    out[o++] = 0;
+    return o;
+}
+
+// A no$gba save file: the header, then the data packed or not.
+static long nocash_file(const uint8_t *data, long n, int method, bool count_first, uint8_t *out)
+{
+    memset(out, 0, 0x50);
+    memcpy(out, "NocashGbaBackupMediaSavDataFile", 31);
+    out[0x1F] = 0x1A;
+    memcpy(out + 0x40, "SRAM", 4);
+    put_le32(out + 0x44, (uint32_t)method);
+    if (method == 0)
+    {
+        put_le32(out + 0x48, (uint32_t)n);
+        memcpy(out + 0x4C, data, (size_t)n);
+        return 0x4C + n;
+    }
+    long packed = nocash_pack(data, n, out + 0x50, count_first);
+    put_le32(out + 0x48, (uint32_t)packed);
+    put_le32(out + 0x4C, (uint32_t)n);
+    return 0x50 + packed;
+}
+
+static void test_emulator_formats(void)
+{
+    new_card();
+    make_dir("_pico");
+    make_rom("Game.nds", "GAME", "ABCE", NULL);
+    make_rom("roms/Other.nds", "OTHER", "XYZE", NULL);
+    make_rom("a/Twin.nds", "TWIN", "TW1E", NULL);
+    make_rom("b/Twin.nds", "TWIN", "TW2E", NULL);
+    library_scan(&lib, root);
+    Game *g = find_game("ABCE");
+    if (!g)
+        return;
+
+    // 64 KB with copied bytes, short runs, long runs and 0xFF padding.
+    enum { SIZE = 64 * KB };
+    static uint8_t data[SIZE], file[SIZE * 2 + 0x100];
+    for (long i = 0; i < SIZE; i++)
+        data[i] = i < 900 ? (uint8_t)(i * 37 + (i >> 3)) : i < 1300 ? 0x00 : i < 1305 ? 0xAA
+                : i < 3000 ? (uint8_t)(i ^ (i >> 5)) : 0xFF;
+    uint32_t want = crc32_update(0, data, SIZE);
+
+    long n = nocash_file(data, SIZE, 0, false, file);
+    write_bytes("_DSavE/import/a raw nocash.sav", file, n);
+    n = nocash_file(data, SIZE, 1, false, file);
+    CHECK(n < SIZE / 4); // Really packed
+    write_bytes("_DSavE/import/b packed.sav", file, n);
+    n = nocash_file(data, SIZE, 1, true, file);
+    write_bytes("_DSavE/import/c packed old.sav", file, n);
+    // Damaged: the end marker and the last runs are lost.
+    write_bytes("_DSavE/import/d damaged.sav", file, n - 4);
+    n = nocash_file(data, SIZE, 1, false, file);
+    file[n - 1] = 0x05; // End marker replaced by a copy past the end
+    write_bytes("_DSavE/import/e bad end.sav", file, n);
+
+    // Action Replay version 1 (.duc) and 2 (.dss).
+    memset(file, 0, 500);
+    memcpy(file, "ARDS000000000001", 16);
+    memcpy(file + 500, data, SIZE);
+    write_bytes("_DSavE/import/f ar.duc", file, 500 + SIZE);
+    memset(file, 0, 0xA4);
+    file[0xA1] = (uint8_t)(SIZE >> 8);
+    file[0xA2] = (uint8_t)(SIZE >> 16);
+    file[0xA3] = 0xC0;
+    memcpy(file + 0xA4, data, SIZE);
+    write_bytes("_DSavE/import/g ar.dss", file, 0xA4 + SIZE);
+    file[0xA1] = 1; // Size no longer matches the file
+    write_bytes("_DSavE/import/h ar bad.dss", file, 0xA4 + SIZE);
+    // The same bytes as a .sav are just a raw file of an odd size.
+    write_bytes("_DSavE/import/i not ar.sav", file, 0xA4 + SIZE);
+
+    ImportFile files[IMPORT_LIST_MAX];
+    int count = backup_import_list(&lib, files, IMPORT_LIST_MAX);
+    CHECK(count == 9);
+    if (count != 9)
+        return;
+    static const struct {
+        EmuFormat format;
+        bool valid;
+        DsaveResult result;
+    } expect[9] = {
+        { EMU_NOCASH, true, DSAVE_OK },
+        { EMU_NOCASH, true, DSAVE_OK },
+        { EMU_NOCASH, true, DSAVE_OK },
+        { EMU_NOCASH, false, DSAVE_ERR_DAMAGED },
+        { EMU_NOCASH, true, DSAVE_ERR_DAMAGED },
+        { EMU_ACTION_REPLAY, true, DSAVE_OK },
+        { EMU_ACTION_REPLAY, true, DSAVE_OK },
+        { EMU_ACTION_REPLAY, false, DSAVE_ERR_DAMAGED },
+        { EMU_RAW, false, DSAVE_ERR_BAD_SIZE },
+    };
+    for (int i = 0; i < count; i++)
+    {
+        Backup b;
+        DsaveResult r = backup_import(&lib, g, files[i].path, &b);
+        CHECK(files[i].format == expect[i].format);
+        CHECK(files[i].valid == expect[i].valid);
+        CHECK(files[i].game == -1);
+        CHECK(r == expect[i].result);
+        if (r == DSAVE_OK)
+            CHECK(b.size == SIZE && b.crc32 == want && backup_validate(&b) == DSAVE_OK);
+        if (r != expect[i].result)
+            printf("  (%s gave %s)\n", files[i].name, dsave_result_str(r));
+    }
+    CHECK(strcmp(emusave_format_name(EMU_NOCASH), "no$gba") == 0 && !emusave_format_name(EMU_RAW)[0]);
+    char tmp[DSAVE_PATH_MAX];
+    p(tmp, "_DSavE/.import.tmp");
+    CHECK(!file_exists(tmp));
+
+    // .dsv for each save size DeSmuME has a type for, and 128 KB, which it
+    // detects from the address size.
+    static const struct {
+        long size;
+        uint32_t type, addr;
+    } dsv[] = { { 512, 1, 1 }, { 8 * KB, 2, 2 }, { 32 * KB, 4, 2 }, { 64 * KB, 3, 2 }, { 128 * KB, 0, 3 },
+                { 256 * KB, 5, 3 }, { 512 * KB, 6, 3 }, { 1024 * KB, 7, 3 }, { 8192 * KB, 10, 3 } };
+    for (size_t i = 0; i < sizeof(dsv) / sizeof(dsv[0]); i++)
+    {
+        uint8_t footer[EMUSAVE_DSV_FOOTER_MAX];
+        int len = emusave_dsv_footer(dsv[i].size, footer);
+        CHECK(len == 82 + 24 + 16);
+        CHECK(le32(footer + 82 + 8) == dsv[i].type && le32(footer + 82 + 12) == dsv[i].addr);
+    }
+
+    // Exported .dsv files import back to the same data.
+    make_save("Game.sav", 512 * KB, 9 * KB, 33);
+    library_refresh_game(&lib, g);
+    Backup b, back;
+    CHECK(backup_create(&lib, g, "for desmume", false, &b) == DSAVE_OK);
+    char out[DSAVE_PATH_MAX];
+    CHECK(backup_export(&lib, g, &b, EXPORT_DSV, out, sizeof(out)) == DSAVE_OK);
+    CHECK(backup_import(&lib, g, out, &back) == DSAVE_OK);
+    CHECK(back.size == b.size && back.crc32 == b.crc32);
+
+    // A save named after a ROM is matched to it: case, ".nds.sav" and .dsv
+    // all count, a name two ROMs share does not.
+    new_card();
+    make_dir("_pico");
+    make_rom("Game.nds", "GAME", "ABCE", NULL);
+    make_rom("roms/Other.nds", "OTHER", "XYZE", NULL);
+    make_rom("a/Twin.nds", "TWIN", "TW1E", NULL);
+    make_rom("b/Twin.nds", "TWIN", "TW2E", NULL);
+    library_scan(&lib, root);
+    make_save("_DSavE/import/game.nds.sav", 8 * KB, 8 * KB, 1);
+    make_save("_DSavE/import/Other.dsv", 8 * KB, 8 * KB, 2);
+    make_save("_DSavE/import/Other.sav.gz.txt", 8 * KB, 8 * KB, 2);
+    make_save("_DSavE/import/Twin.sav", 8 * KB, 8 * KB, 3);
+    make_save("_DSavE/import/Unknown.duc", 8 * KB, 8 * KB, 4);
+    count = backup_import_list(&lib, files, IMPORT_LIST_MAX);
+    CHECK(count == 4);
+    if (count != 4)
+        return;
+    Game *other = find_game("XYZE");
+    CHECK(strcmp(files[0].name, "game.nds.sav") == 0 && files[0].game == find_game("ABCE") - lib.games);
+    CHECK(strcmp(files[1].name, "Other.dsv") == 0 && files[1].game == other - lib.games);
+    CHECK(strcmp(files[2].name, "Twin.sav") == 0 && files[2].game == -1);
+    // Not really an Action Replay file, so it reads as damaged.
+    CHECK(strcmp(files[3].name, "Unknown.duc") == 0 && files[3].game == -1 && !files[3].valid);
+    CHECK(backup_import(&lib, other, files[1].path, &b) == DSAVE_OK && strcmp(b.name, "import_Other") == 0);
+    CHECK(backup_import(&lib, other, files[0].path, &b) == DSAVE_OK && strcmp(b.name, "import_game") == 0);
+}
+
 int main(void)
 {
     char tmpl[] = "/tmp/dsave-test-XXXXXX";
@@ -1581,6 +1841,7 @@ int main(void)
     test_restore_guards();
     test_restore_sizes();
     test_export_trim();
+    test_emulator_formats();
     test_restore_to_other_kernel();
     test_blank_and_first_save();
     test_sync_check();

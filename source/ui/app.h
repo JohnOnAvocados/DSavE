@@ -19,7 +19,7 @@
 #include "../core/sync.h"
 #include "gfx.h"
 
-#define APP_VERSION "0.2.0"
+#define APP_VERSION "0.3.0"
 
 #define SCREEN_W 256
 #define SCREEN_H 192
@@ -76,6 +76,7 @@ typedef enum {
     OP_RENAME,
     OP_TRASH,
     OP_EXPORT,
+    OP_EXPORT_DSV,
     OP_SET_KERNEL,
     OP_OPEN_COPIES,
     OP_COPY_HERE,
@@ -122,6 +123,7 @@ typedef struct {
 
     ImportFile imports[IMPORT_LIST_MAX];
     int import_count, import_sel, import_scroll;
+    int import_game;      // Game the chosen import file goes into
 
     char kb_text[BACKUP_NAME_MAX + 1];
     int kb_row, kb_col;

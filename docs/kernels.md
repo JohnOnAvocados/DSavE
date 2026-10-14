@@ -159,3 +159,15 @@ flashcart), with a retail game in slot 1.
 5. Report the game code and the chip type DSavE shows for any card that fails,
    so the chip table can be fixed. Back up anything precious with GodMode9i
    first until this has been tested.
+
+### Emulator saves
+
+1. Copy a save from melonDS (`.sav`) or DeSmuME/DraStic (`.dsv`) into
+   `_DSavE/import/`, named like the game's ROM. Open *Import a save* under Y
+   on any game: the bottom line should name the ROM's game. Import it, restore
+   it, and check the game loads the emulator's progress.
+2. If you have no$gba or an Action Replay `.duc`, try one of those too. no$gba
+   packs its saves; if DSavE says the file is damaged, please share the file
+   so the unpacking can be checked.
+3. Under Y, use *Export .sav* and *Export .dsv*, copy the files from
+   `_DSavE/export/` to a PC, and load each in its emulator.

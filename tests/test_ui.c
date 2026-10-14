@@ -481,6 +481,17 @@ static void test_import(void)
     make_pico_card();
     make_save("_DSavE/import/Kirby from PC.sav", 512 * KB, 3 * KB, 9);
     make_save("_DSavE/import/broken.sav", 1000, 1000, 9);
+    // DeSmuME's save for a ROM on the card.
+    make_save("_DSavE/import/Tetris DS.dsv", 8 * KB, 8 * KB, 10);
+    {
+        char path[DSAVE_PATH_MAX];
+        p(path, "_DSavE/import/Tetris DS.dsv");
+        uint8_t footer[EMUSAVE_DSV_FOOTER_MAX];
+        int n = emusave_dsv_footer(8 * KB, footer);
+        FILE *f = fopen(path, "ab");
+        fwrite(footer, 1, (size_t)n, f);
+        fclose(f);
+    }
     start_app();
 
     // Keep auto backups: Right from 10 goes to 20.
@@ -493,16 +504,16 @@ static void test_import(void)
     shot("18_keep_auto");
     press(UI_KEY_B);
 
-    // Y, "Import a .sav", lists the import folder.
+    // Y, "Import a save", lists the import folder.
     select_game("ATKE");
     press(UI_KEY_Y);
-    for (int i = 0; i < 5 && app.more_sel != 4; i++)
+    for (int i = 0; i < 6 && app.more_sel != 5; i++)
         press(UI_KEY_DOWN); // Skips the items that need a backup
-    CHECK(app.more_sel == 4);
+    CHECK(app.more_sel == 5);
     press(UI_KEY_A);
-    CHECK(app.modal == MODAL_IMPORT && app.import_count == 2);
+    CHECK(app.modal == MODAL_IMPORT && app.import_count == 3);
     shot("19_import");
-    if (app.import_count != 2)
+    if (app.import_count != 3)
         return;
 
     // The bad size is refused; the good one becomes a backup.
@@ -521,6 +532,39 @@ static void test_import(void)
     CHECK(app.modal == MODAL_NONE && status_ok() && app.backup_count == 1);
     CHECK(strncmp(app.backups[0].name, "import_", 7) == 0);
     shot("21_imported");
+
+    // A .dsv named after Tetris goes into Tetris, though Kirby is selected.
+    int kirby = app.game_sel;
+    press(UI_KEY_Y);
+    for (int i = 0; i < 6 && app.more_sel != 5; i++)
+        press(UI_KEY_DOWN);
+    press(UI_KEY_A);
+    CHECK(app.modal == MODAL_IMPORT && app.import_count == 3);
+    while (app.import_sel != 2)
+        press(UI_KEY_DOWN);
+    CHECK(app.imports[2].valid && app.imports[2].format == EMU_DESMUME && app.imports[2].size == 8 * KB);
+    CHECK(app.imports[2].game >= 0 && strcmp(lib.games[app.imports[2].game].info.game_code, "ATRE") == 0);
+    shot("21b_import_matched");
+    press(UI_KEY_A);
+    CHECK(app.modal == MODAL_CONFIRM && strstr(app.dlg_text, "Tetris DS"));
+    press(UI_KEY_A);
+    CHECK(app.modal == MODAL_NONE && status_ok() && app.game_sel != kirby);
+    CHECK(strcmp(lib.games[app.game_sel].info.game_code, "ATRE") == 0);
+    CHECK(app.backup_count == 1 && strcmp(app.backups[0].name, "import_Tetris DS") == 0);
+    CHECK(app.backups[0].size == 8 * KB);
+
+    // Export it for DeSmuME: named after the ROM, footer added.
+    press(UI_KEY_Y);
+    CHECK(app.modal == MODAL_MORE);
+    for (int i = 0; i < 6 && app.more_sel != 3; i++)
+        press(UI_KEY_DOWN);
+    shot("21c_more_export");
+    press(UI_KEY_A);
+    settle();
+    CHECK(status_ok() && strstr(app.status, "Tetris DS.dsv"));
+    char out[DSAVE_PATH_MAX];
+    p(out, "_DSavE/export/Tetris DS.dsv");
+    CHECK(file_size(out) > 8 * KB);
 }
 
 static void test_fonts(void)

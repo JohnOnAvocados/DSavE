@@ -38,6 +38,7 @@ const char *dsave_result_str(DsaveResult r)
         case DSAVE_ERR_ROLLED_BACK:   return "Restore failed; old save kept";
         case DSAVE_ERR_UNSUPPORTED:   return "Not supported by this kernel";
         case DSAVE_ERR_CARD_CHANGED:  return "The game card was removed or changed";
+        case DSAVE_ERR_DAMAGED:       return "That save file is damaged";
         case DSAVE_ERR_CARD:          return "The game card's save chip did not answer";
     }
     return "Unknown error";
@@ -564,22 +565,37 @@ DsaveResult backup_trash(const Library *lib, const Game *game, const Backup *b)
     return rename(b->dir, target) == 0 ? DSAVE_OK : DSAVE_ERR_IO;
 }
 
-DsaveResult backup_export(const Library *lib, const Game *game, const Backup *b,
+// The name an emulator looks for: the ROM's file name with the save's
+// extension. A game card has no ROM, so it gets its title and game code.
+static void export_stem(const Game *game, char *out, size_t size)
+{
+    if (game->rom_path[0] && !game->is_card)
+    {
+        path_basename(out, size, game->rom_path);
+        path_strip_ext(out);
+        return;
+    }
+    char title[TITLE_MAX + 1];
+    sanitize_name(title, sizeof(title), game->title, TITLE_MAX);
+    snprintf(out, size, "%s_%s", title, game->info.game_code);
+}
+
+DsaveResult backup_export(const Library *lib, const Game *game, const Backup *b, ExportFormat format,
                           char *out_path, size_t out_size)
 {
     DsaveResult r = backup_validate(b);
     if (r != DSAVE_OK)
         return r;
 
-    char dir[DSAVE_PATH_MAX], title[TITLE_MAX + 1], leaf[TITLE_MAX + BACKUP_NAME_MAX + 16];
-    char target[DSAVE_PATH_MAX];
+    char dir[DSAVE_PATH_MAX], stem[DSAVE_PATH_MAX], leaf[DSAVE_PATH_MAX];
+    char target[DSAVE_PATH_MAX], tmp[DSAVE_PATH_MAX];
     if (!path_join(dir, sizeof(dir), lib->root, EXPORT_DIR))
         return DSAVE_ERR_PATH;
     if (!mkdir_p(dir))
         return DSAVE_ERR_IO;
-    sanitize_name(title, sizeof(title), game->title, TITLE_MAX);
-    snprintf(leaf, sizeof(leaf), "%s_%s_%s", title, game->info.game_code, b->name);
-    if (!unique_path(target, sizeof(target), dir, leaf, ".sav"))
+    export_stem(game, stem, sizeof(stem));
+    snprintf(leaf, sizeof(leaf), "%s%s", stem, format == EXPORT_DSV ? ".dsv" : ".sav");
+    if (!path_join(target, sizeof(target), dir, leaf) || !path_join(tmp, sizeof(tmp), dir, ".export.tmp"))
         return DSAVE_ERR_PATH;
 
     // Export the real chip image when the chip size is known and the rest of
@@ -590,10 +606,31 @@ DsaveResult backup_export(const Library *lib, const Game *game, const Backup *b,
         len = game->chip_size;
 
     uint32_t crc;
-    if (size < 0 || !write_save_stream(b->file, size, target, len, &crc))
-        return DSAVE_ERR_IO;
-    if (!matches(target, crc, len))
-        return DSAVE_ERR_VERIFY;
+    remove(tmp);
+    bool ok = size >= 0 && write_save_stream(b->file, size, tmp, len, &crc);
+    long total = len;
+    if (ok && format == EXPORT_DSV)
+    {
+        uint8_t footer[EMUSAVE_DSV_FOOTER_MAX];
+        int n = emusave_dsv_footer(len, footer);
+        FILE *f = fopen(tmp, "ab");
+        ok = f && fwrite(footer, 1, (size_t)n, f) == (size_t)n;
+        if (f && fclose(f) != 0)
+            ok = false;
+        crc = crc32_update(crc, footer, (size_t)n);
+        total += n;
+    }
+    if (!ok)
+        r = DSAVE_ERR_IO;
+    else if (!matches(tmp, crc, total))
+        r = DSAVE_ERR_VERIFY;
+    else if ((file_exists(target) && remove(target) != 0) || rename(tmp, target) != 0)
+        r = DSAVE_ERR_IO;
+    if (r != DSAVE_OK)
+    {
+        remove(tmp);
+        return r;
+    }
 
     if (out_path)
         snprintf(out_path, out_size, "%s", target);
@@ -632,56 +669,46 @@ int backup_prune_auto(const Library *lib, const Game *game, int keep, const char
 // ---------------------------------------------------------------------------
 // Import
 
-#define DSV_MARKER "|<--Snip above here to create a raw sav by excluding this DeSmuME savedata footer:"
-#define DSV_END "|-DESMUME SAVE-|"
-#define NOCASH_MAGIC "NocashGbaBackupMediaSavDataFile"
-
-// Length of the save data in a raw file: everything before a DeSmuME
-// footer, or the whole file. Returns -1 for a no$gba save, whose data is
-// wrapped (and often compressed) in its own format.
-static long raw_data_length(const char *path)
-{
-    long size = file_size(path);
-    if (size < 0)
-        return -1;
-    FILE *f = fopen(path, "rb");
-    if (!f)
-        return -1;
-
-    char head[sizeof(NOCASH_MAGIC)] = "";
-    if (fread(head, 1, sizeof(head) - 1, f) == sizeof(head) - 1 && strcmp(head, NOCASH_MAGIC) == 0)
-    {
-        fclose(f);
-        return -1;
-    }
-
-    // The DeSmuME footer is a marker, a few fields and DSV_END at the end.
-    char tail[256 + 1];
-    long n = size < 256 ? size : 256;
-    long len = size;
-    if (fseek(f, size - n, SEEK_SET) == 0 && fread(tail, 1, (size_t)n, f) == (size_t)n)
-    {
-        long end = (long)strlen(DSV_END);
-        if (n >= end && memcmp(tail + n - end, DSV_END, (size_t)end) == 0)
-        {
-            long marker = (long)strlen(DSV_MARKER);
-            for (long i = n - end - marker; i >= 0; i--)
-            {
-                if (memcmp(tail + i, DSV_MARKER, (size_t)marker) == 0)
-                {
-                    len = size - n + i;
-                    break;
-                }
-            }
-        }
-    }
-    fclose(f);
-    return len;
-}
-
 static bool importable(const char *name)
 {
-    return has_ext(name, ".sav") || has_ext(name, ".dsv") || has_ext(name, ".sav.gz");
+    return has_ext(name, ".sav") || has_ext(name, ".dsv") || has_ext(name, ".sav.gz") || has_ext(name, ".duc") ||
+           has_ext(name, ".dss");
+}
+
+// A file name without its save extension, and without ".nds" left over from
+// a "game.nds.sav" name.
+static void import_stem(char *out, size_t size, const char *name)
+{
+    snprintf(out, size, "%s", name);
+    if (has_ext(out, ".gz"))
+        path_strip_ext(out);
+    path_strip_ext(out);
+    if (has_ext(out, ".nds") || has_ext(out, ".dsi"))
+        path_strip_ext(out);
+}
+
+// The game whose ROM file is named like the import file, as emulators name
+// their saves. -1 when none or more than one match.
+static int match_rom(const Library *lib, const char *name)
+{
+    char stem[DSAVE_PATH_MAX], rom[DSAVE_PATH_MAX];
+    import_stem(stem, sizeof(stem), name);
+    int found = -1;
+    for (int i = 0; i < lib->count; i++)
+    {
+        const Game *g = &lib->games[i];
+        if (g->is_card || !g->rom_path[0])
+            continue;
+        path_basename(rom, sizeof(rom), g->rom_path);
+        path_strip_ext(rom);
+        if (strcasecmp(rom, stem) == 0)
+        {
+            if (found >= 0)
+                return -1;
+            found = i;
+        }
+    }
+    return found;
 }
 
 static int compare_imports(const void *a, const void *b)
@@ -708,8 +735,15 @@ int backup_import_list(const Library *lib, ImportFile *out, int max)
         snprintf(f->name, sizeof(f->name), "%s", e->d_name);
         if (!path_join(f->path, sizeof(f->path), dir, e->d_name) || !file_exists(f->path))
             continue;
-        f->size = savefile_is_gz(f->path) ? savefile_size(f->path) : raw_data_length(f->path);
+        EmuSave es = { .format = EMU_RAW, .length = -1 };
+        if (savefile_is_gz(f->path))
+            es.length = savefile_size(f->path);
+        else
+            emusave_probe(f->path, &es);
+        f->size = es.length;
+        f->format = es.format;
         f->valid = is_valid_save_size(f->size);
+        f->game = match_rom(lib, f->name);
         n++;
     }
     closedir(d);
@@ -722,42 +756,30 @@ DsaveResult backup_import(const Library *lib, const Game *game, const char *path
     if (!file_exists(path))
         return DSAVE_ERR_NO_SAVE;
     bool gz = savefile_is_gz(path);
-    long len = gz ? savefile_size(path) : raw_data_length(path);
-    if (!gz && len < 0 && file_size(path) >= 0)
-        return DSAVE_ERR_UNSUPPORTED; // no$gba
-    if (len < 0)
-        return gz ? DSAVE_ERR_CORRUPT : DSAVE_ERR_IO;
-    if (!is_valid_save_size(len))
+    EmuSave es = { .format = EMU_RAW, .length = -1 };
+    if (gz)
+        es.length = savefile_size(path);
+    else if (!emusave_probe(path, &es))
+        return DSAVE_ERR_IO;
+    if (es.length < 0)
+        return gz ? DSAVE_ERR_CORRUPT : DSAVE_ERR_DAMAGED;
+    if (!is_valid_save_size(es.length))
         return DSAVE_ERR_BAD_SIZE;
 
-    char stem[DSAVE_PATH_MAX], name[BACKUP_NAME_MAX + 1];
-    path_basename(stem, sizeof(stem), path);
-    if (gz)
-        path_strip_ext(stem);
-    path_strip_ext(stem);
+    char base[DSAVE_PATH_MAX], stem[DSAVE_PATH_MAX], name[BACKUP_NAME_MAX + 1];
+    path_basename(base, sizeof(base), path);
+    import_stem(stem, sizeof(stem), base);
     snprintf(name, sizeof(name), "import_%s", stem);
 
-    if (gz || len == file_size(path))
+    if (gz || (es.format == EMU_RAW && es.length == file_size(path)))
         return backup_create_labeled(lib, game, path, path, name, true, out);
 
-    // Trim the emulator footer into a temporary file first.
+    // Take the save data out of the emulator's file first.
     char tmp[DSAVE_PATH_MAX];
     if (!path_join(tmp, sizeof(tmp), lib->root, APP_DIR "/.import.tmp"))
         return DSAVE_ERR_PATH;
-    FILE *in = fopen(path, "rb"), *o = fopen(tmp, "wb");
-    bool ok = in && o;
-    uint8_t buf[IO_CHUNK];
-    for (long done = 0; ok && done < len;)
-    {
-        size_t want = (size_t)(len - done < IO_CHUNK ? len - done : IO_CHUNK);
-        ok = fread(buf, 1, want, in) == want && fwrite(buf, 1, want, o) == want;
-        done += (long)want;
-    }
-    if (in)
-        fclose(in);
-    if (o && fclose(o) != 0)
-        ok = false;
-    DsaveResult r = ok ? backup_create_labeled(lib, game, tmp, path, name, true, out) : DSAVE_ERR_IO;
+    DsaveResult r = emusave_extract(path, &es, tmp) ? backup_create_labeled(lib, game, tmp, path, name, true, out)
+                                                     : es.packed ? DSAVE_ERR_DAMAGED : DSAVE_ERR_IO;
     remove(tmp);
     return r;
 }
