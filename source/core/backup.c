@@ -318,40 +318,62 @@ static int compare_backups(const void *a, const void *b)
     return strcmp(bb->name, ba->name);
 }
 
+// Read the backup folder `name` in game_dir into b. False if it isn't one.
+static bool read_backup(const char *game_dir, const char *name, Backup *b)
+{
+    memset(b, 0, sizeof(*b));
+    if (!path_join(b->dir, sizeof(b->dir), game_dir, name) || !dir_exists(b->dir))
+        return false;
+    if (!find_sav(b->dir, b->file, sizeof(b->file)))
+        return false;
+    snprintf(b->name, sizeof(b->name), "%s", name);
+    b->has_meta = read_meta(b);
+    if (!b->has_meta)
+    {
+        // Hand-copied backup: fall back to what the file itself says.
+        b->size = savefile_size(b->file);
+        snprintf(b->created, sizeof(b->created), "%s", b->name);
+    }
+    b->is_auto = strncmp(b->name, AUTO_PREFIX, strlen(AUTO_PREFIX)) == 0;
+    b->compressed = savefile_is_gz(b->file);
+    return true;
+}
+
 int backup_list(const Library *lib, const Game *game, Backup *out, int max)
 {
     char game_dir[DSAVE_PATH_MAX];
-    if (!backup_game_dir(lib, game, game_dir, sizeof(game_dir)))
+    if (max <= 0 || !backup_game_dir(lib, game, game_dir, sizeof(game_dir)))
         return 0;
     DIR *d = opendir(game_dir);
     if (!d)
         return 0;
 
+    // Read every folder and keep the newest `max`: directory order is not
+    // date order (FAT puts a new folder in the first free slot), so stopping
+    // at `max` could hide the newest backups.
+    static Backup extra;
     int n = 0;
     struct dirent *e;
-    while (n < max && (e = readdir(d)) != NULL)
+    while ((e = readdir(d)) != NULL)
     {
         if (e->d_name[0] == '.')
             continue; // ".", "..", and unfinished ".tmp_" folders
-
-        Backup *b = &out[n];
-        memset(b, 0, sizeof(*b));
-        if (!path_join(b->dir, sizeof(b->dir), game_dir, e->d_name) || !dir_exists(b->dir))
-            continue;
-        if (!find_sav(b->dir, b->file, sizeof(b->file)))
-            continue;
-
-        snprintf(b->name, sizeof(b->name), "%s", e->d_name);
-        b->has_meta = read_meta(b);
-        if (!b->has_meta)
+        if (n < max)
         {
-            // Hand-copied backup: fall back to what the file itself says.
-            b->size = savefile_size(b->file);
-            snprintf(b->created, sizeof(b->created), "%s", b->name);
+            if (read_backup(game_dir, e->d_name, &out[n]))
+                n++;
+            continue;
         }
-        b->is_auto = strncmp(b->name, AUTO_PREFIX, strlen(AUTO_PREFIX)) == 0;
-        b->compressed = savefile_is_gz(b->file);
-        n++;
+        if (!read_backup(game_dir, e->d_name, &extra))
+            continue;
+        int oldest = 0;
+        for (int i = 1; i < n; i++)
+        {
+            if (compare_backups(&out[i], &out[oldest]) > 0)
+                oldest = i;
+        }
+        if (compare_backups(&extra, &out[oldest]) < 0)
+            out[oldest] = extra;
     }
     closedir(d);
 

@@ -1887,6 +1887,51 @@ static void test_restore_disk_full(void)
     CHECK(backup_restore(&lib, h, &hb, &safety) == DSAVE_OK && crc_of(fresh) == crc_of(big));
 }
 
+// More backups than a list holds: the list keeps the newest, whatever order
+// the folders come back in.
+static void test_backup_list_newest(void)
+{
+    new_card();
+    make_dir("_pico");
+    make_rom("roms/G.nds", "GAME", "ABCE", "Game");
+    library_scan(&lib, root);
+    Game *g = find_game("ABCE");
+    for (int i = 0; i < BACKUP_LIST_MAX + 16; i++)
+    {
+        // Names run against the dates, so name order is no help either.
+        char rel[DSAVE_PATH_MAX], ini[160];
+        snprintf(rel, sizeof(rel), "_DSavE/saves/ABCE Game/b%03d/Game.sav", 999 - i);
+        make_file(rel, 8 * KB, (uint8_t)i);
+        snprintf(rel, sizeof(rel), "_DSavE/saves/ABCE Game/b%03d/backup.ini", 999 - i);
+        snprintf(ini, sizeof(ini), "code=ABCE\nsize=8192\ncrc32=0\ncreated=2026-01-%02d_%02d-00-00\n", 1 + i / 24, i % 24);
+        make_text(rel, ini);
+    }
+    static Backup list[BACKUP_LIST_MAX];
+    CHECK(backup_list(&lib, g, list, BACKUP_LIST_MAX) == BACKUP_LIST_MAX);
+    CHECK(strcmp(list[0].name, "b920") == 0); // The newest, i = 79
+    CHECK(strcmp(list[BACKUP_LIST_MAX - 1].name, "b983") == 0); // i = 16
+    Backup few[3];
+    CHECK(backup_list(&lib, g, few, 3) == 3 && strcmp(few[2].name, "b922") == 0);
+}
+
+// no$gba headers with absurd sizes are refused before any size arithmetic.
+static void test_nocash_huge_header(void)
+{
+    new_card();
+    static uint8_t file[0x60], data[16];
+    long n = nocash_file(data, sizeof(data), 1, false, file);
+    put_le32(file + 0x4C, 0x7FFFFFFF); // Unpacked size
+    write_bytes("huge.sav", file, n);
+    char path[DSAVE_PATH_MAX];
+    p(path, "huge.sav");
+    EmuSave es;
+    CHECK(emusave_probe(path, &es) && es.format == EMU_NOCASH && es.length == -1);
+    put_le32(file + 0x44, 0);
+    put_le32(file + 0x48, 0xFFFFFFF0); // Raw size
+    write_bytes("huge.sav", file, n);
+    CHECK(emusave_probe(path, &es) && es.length == -1);
+}
+
 static void test_emulator_formats(void)
 {
     new_card();
@@ -2064,6 +2109,8 @@ int main(void)
     test_card_probe();
     test_card_backup_restore();
     test_card_pulled();
+    test_backup_list_newest();
+    test_nocash_huge_header();
     test_restore_disk_full();
 
     library_free(&lib);

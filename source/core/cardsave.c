@@ -577,9 +577,10 @@ DsaveResult card_backup(const Library *lib, CardSlot *slot, const Game *card, co
 }
 
 // Write a save file's data (raw or .gz) to the whole chip, padding with
-// 0xFF, skipping chunks that already match. crc_out is the CRC-32 of what
-// the chip should now hold.
-static DsaveResult write_chip(CardBus *bus, const CardChip *chip, const char *path,
+// 0xFF, skipping chunks that already match. data_len is the file's save
+// length: a read that comes back short before it is an SD error, not the
+// end of the data. crc_out is the CRC-32 of what the chip should now hold.
+static DsaveResult write_chip(CardBus *bus, const CardChip *chip, const char *path, long data_len,
                               uint32_t *crc_out, Progress *pr)
 {
     SaveReader in;
@@ -590,7 +591,14 @@ static DsaveResult write_chip(CardBus *bus, const CardChip *chip, const char *pa
     for (long off = 0; r == DSAVE_OK && off < chip->size; off += CHUNK)
     {
         uint32_t n = chunk_len(chip, off);
+        long left = data_len - off;
+        size_t expect = left <= 0 ? 0 : left < (long)n ? (size_t)left : n;
         size_t got = savefile_read(&in, chunk_a, n);
+        if (got < expect)
+        {
+            r = DSAVE_ERR_IO;
+            break;
+        }
         memset(chunk_a + got, 0xFF, n - got);
         crc = crc32_update(crc, chunk_a, n);
         card_chip_read(bus, chip, (uint32_t)off, chunk_b, n);
@@ -624,13 +632,14 @@ DsaveResult card_restore(const Library *lib, CardSlot *slot, Game *card, const B
     CardChip *chip = &now.chip;
     if (!chip->writable)
         return DSAVE_ERR_UNSUPPORTED;
-    if (!card_chip_test_size(bus, chip))
-        return DSAVE_ERR_CARD;
+    // A guessed size is the largest the chip can be, so this check holds
+    // before the size is settled; it is made again after.
     long size = savefile_size(b->file);
     if (size > chip->size && !savefile_tail_is_ff(b->file, chip->size))
         return DSAVE_ERR_BAD_SIZE;
 
-    // Safety copy first; then write, then read it all back.
+    // Safety copy first (before the size test writes a byte); then write,
+    // then read it all back.
     Progress pr = { progress, 0, chip->size * 4 };
     char auto_name[BACKUP_NAME_MAX + 1];
     backup_auto_name(auto_name, sizeof(auto_name));
@@ -641,16 +650,24 @@ DsaveResult card_restore(const Library *lib, CardSlot *slot, Game *card, const B
     if (auto_backup)
         *auto_backup = safety;
     backup_prune_auto(lib, card, lib->keep_auto, safety.name);
+    if (chip->size_guessed)
+    {
+        if (!card_chip_test_size(bus, chip))
+            return DSAVE_ERR_CARD;
+        if (size > chip->size && !savefile_tail_is_ff(b->file, chip->size))
+            return DSAVE_ERR_BAD_SIZE;
+        pr.total = pr.done + chip->size * 2;
+    }
 
     uint32_t want, got;
-    r = write_chip(bus, chip, b->file, &want, &pr);
+    r = write_chip(bus, chip, b->file, size, &want, &pr);
     if (r == DSAVE_OK && chip_crc(bus, chip, &pr, &got) && got == want)
         return DSAVE_OK;
 
     // Put the old save back, and say so only if it reads back right. A card
     // that was pulled out can't be put back; the auto backup holds its save.
     Progress again = { NULL, 0, 0 };
-    if (!card_gone(bus) && write_chip(bus, chip, safety.file, &want, &again) == DSAVE_OK &&
+    if (!card_gone(bus) && write_chip(bus, chip, safety.file, safety.size, &want, &again) == DSAVE_OK &&
         chip_crc(bus, chip, &again, &got) && got == want)
         return DSAVE_ERR_ROLLED_BACK;
     return DSAVE_ERR_ROLLBACK_FAILED;
