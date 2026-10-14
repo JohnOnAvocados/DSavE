@@ -15,7 +15,8 @@ ancestor and are marked as such.
 | AKAIO | `__aio/` | `<rom dir>/<rom name>.sav` | none | `globalsettings.ini` | not yet |
 | Generic | (nothing else found) | `<rom dir>/<rom name>.sav` | none | none | n/a |
 
-`<rom name>` is the ROM's file name without its extension.
+`<rom name>` is the ROM's file name without its extension. DSiWare titles
+keep their saves differently; see [DSiWare saves](#dsiware-saves).
 
 ## Pico Launcher / Pico Loader
 
@@ -67,6 +68,102 @@ follow the same naming.
 Saves sit beside the ROM as `<rom name>.sav`. YSMenu is known to sometimes
 create 8.3 short names such as `SIMS4~1.SAV` for long ROM names. DSavE does
 not yet detect those.
+
+## DSiWare saves
+
+A DSiWare title is a `.nds` (or `.dsi`) installed to the DSi's NAND rather
+than sold on a card. It has no save chip. On a DSi it saves to up to three
+files in its NAND folder; loaders that run DSiWare from an SD card keep
+them beside the ROM instead:
+
+| File on a DSi | Beside the ROM | What it is | Size |
+|---|---|---|---|
+| `public.sav` | `<rom name>.pub` | FAT12 image | header `0x238` (u32) |
+| `private.sav` | `<rom name>.prv` | FAT12 image | header `0x23C` (u32) |
+| `banner.sav` | `<rom name>.bnr` | the title's own animated icon | `0x4000`, when header `0x1BF` bit 2 is set |
+
+DSavE treats a ROM as DSiWare when its unit code (`0x012`) has bit 1 set
+(it runs in DSi mode) and the high word of its title ID (`0x234`) is
+`0003xxxx` with bit 2 set: `00030004` for DSiWare, `00030005`, `00030015`
+and `00030017` for system titles. DSi-enhanced game cards are `00030000`.
+DS-mode DSiWare such as Download Play has unit code 0 and no save.
+
+Sources, read at TWiLightMenu `0eed9d6`, nds-bootstrap `cbc71bc`,
+pico-loader `b9f923e` and pico-launcher `dc64a34`:
+
+- Header offsets: TWiLight Menu++'s `sNDSHeaderExt`
+  (`romsel_dsimenutheme/arm9/source/ndsheaderbanner.h`: `dsi_flags` at
+  `0x1BF`, `dsi_tid2` at `0x234`, `pubSavSize` at `0x238`, `prvSavSize` at
+  `0x23C`), Pico Loader's `nds_header_twl_t` (`common/ndsHeader.h`), which
+  also has `IsDsiWare()`: title ID bit 2 of the high word, and nds-bootstrap
+  (`retail/arm9/source/conf_sd.cpp`, which reads the two sizes at `0x238`).
+  TWiLight's own test is unit code non-zero and access control (`0x1B4`)
+  bit 4 (`romsel_dsimenutheme/arm9/source/iconTitle.cpp`).
+
+### Pico Loader / Pico Launcher
+
+Pico Launcher lists DSiWare like any ROM and passes no save path. Pico
+Loader's `DsiWareSaveArranger::SetupDsiWareSave`
+(`arm7/source/loader/DsiWareSaveArranger.cpp`, called from `NdsLoader.cpp`)
+replaces the ROM's extension with `.prv`, `.pub` and `.bnr` for each file
+the header asks for. A missing or short file is grown to the header's size
+(FAT12-formatted, or zero-filled for the banner) and never shrunk. There
+are no slots. Pico Loader redirects the rest of NAND to the SD card
+(`photo/`, `shared1/`, `shared2/`, `sys/`), but DSavE only manages the
+three save files. The title only runs in DSi mode on a DSi or 3DS.
+
+### TWiLight Menu++
+
+`romsel_dsimenutheme/arm9/source/main.cpp` (the DSiWare branch of the
+launch code) and `perGameSettings.cpp` (`getPubExtension`,
+`getPrvExtension`, `getBnrExtension`):
+
+- The folder follows `SAVE_LOCATION` as for `.sav` files: `<rom
+  dir>/saves/`, beside the ROM, or `_nds/TWiLightMenu/saves/`.
+- `SAVE_NUMBER` N (not when saves are beside the ROM) makes the files
+  `.puN`, `.prN` and `.bnN`.
+- Two layouts, chosen at launch. When nds-bootstrap runs the title and
+  either the ROM is 64 MB or more, slot-1 mode is on, or the title is on a
+  flashcart and TWiLight is in DS mode (B4DS, or no SD access), the title's
+  saves are one `<rom name>.sav` (`.savN`) the size of the public save (the
+  private one if there is no public), plus the `.bnr`. Otherwise they are
+  `.pub`, `.prv` and `.bnr`. nds-bootstrap gets the paths as `SAV_PATH`,
+  `PRV_PATH` and `BNR_PATH`.
+- Missing files are created at launch: `.pub` and `.prv` FAT12-formatted
+  (`createDSiWareSave`), the `.sav` zero-filled, the `.bnr` `0x4000` bytes.
+- When TWiLight boots DSiWare through Unlaunch, it first moves `.pub` and
+  `.prv` out of `saves/` to sit beside the ROM, and moves them back the next
+  time it starts (`title/arm9/source/main.cpp`). When it runs a title from a
+  flashcart through the DSi's SD card, it copies the files to
+  `sd:/_nds/TWiLightMenu/tempDSiWare.*` and back.
+
+DSavE decides which layout a TWiLight location uses from the files already
+there (a `.pub` or `.prv` means the first, a `.sav` the second). With
+neither, it assumes the second when DSavE itself runs in DS mode, and the
+first in DSi mode.
+
+### What DSavE does
+
+- **Backup:** every file there goes into one backup folder as
+  `public.sav`, `private.sav` and `banner.sav`, and `backup.ini` records
+  `dsiware=1` and `public_size`, `public_crc32` (and the same for
+  `private` and `banner`). `size` and `crc32` describe the main file, the
+  public save. DSiWare backups are never compressed.
+- **Restore:** each file the title uses and the backup holds is written in
+  place, at exactly the backup file's size, never padded. A file shorter
+  than the header's size is refused. A missing file is created. The SAV
+  layout gets the public save in its `.sav` and no private save. All the
+  files there are backed up first as one `auto_` backup, and if any file
+  fails to read back, all of them are put back and new ones removed.
+- A one-file backup of a DSiWare title (an imported `.sav`, or one DSavE
+  0.5 made from TWiLight's `.sav`) is its public save.
+- **Copies:** copies are compared over all their files, and a copy writes
+  all of them.
+- **Export:** `<rom name>.pub`, `.prv`, `.bnr` in `_DSavE/export/`. No `.dsv`.
+- **Import:** a `.pub`, `.prv` or `.bnr` in `_DSavE/import/` brings its
+  siblings of the same name. A raw `.sav` is taken as the public save. Each
+  must be exactly the header's size.
+- DSavE never reads or writes the DSi's system NAND.
 
 ## Several kernels on one card
 
@@ -159,6 +256,46 @@ flashcart), with a retail game in slot 1.
 5. Report the game code and the chip type DSavE shows for any card that fails,
    so the chip table can be fixed. Back up anything precious with GodMode9i
    first until this has been tested.
+
+### DSiWare
+
+Back up any DSiWare save you care about to a PC first. These need a DSiWare
+title with a save (Flipnote Studio, the Art Style series, WarioWare:
+Snapped!...). Note the title, its game code and the "Save files" line DSavE
+shows.
+
+On the DS Pico and the Ace3DS X in DS mode (DS or DS Lite):
+
+1. **TWiLight Menu++ (DS mode):** launch the title from TWiLight and save.
+   In DSavE (TWiLight active), check the save is `saves/<rom>.sav` with a
+   `.bnr` if the title has a banner save, and that the size is the title's
+   public save size. Back up, play on, restore, and check the old save
+   loads.
+2. With a TWiLight save number set for the title, check DSavE follows
+   `.savN` and `.bnN`.
+3. **Pico Launcher:** see whether the title starts at all on a DS Lite (it
+   should not, as DSi-mode titles need a DSi). Whether it does or not, note
+   which of `.pub`, `.prv`, `.bnr` appear beside the ROM, and check DSavE
+   lists them for Pico Launcher.
+4. Restore onto a title with no save files yet, then launch it and check the
+   loader accepts the files DSavE made.
+5. Export a backup and check `_DSavE/export/` holds `<rom>.pub` and the
+   others; import them back from `_DSavE/import/`.
+
+Only a DSi or 3DS can check the rest:
+
+6. **TWiLight Menu++ in DSi mode from the SD card:** check the save is
+   `.pub`/`.prv`/`.bnr` in `saves/` (or `.puN`... with a save number), back
+   up, restore, and check the title loads the old save. If the title
+   changes its banner save (its icon), check the restored one comes back.
+7. **Pico Launcher on a DSi or 3DS (DSpico):** back up, restore and load
+   with the files beside the ROM.
+8. **A DSi-mode flashcart with TWiLight** (files copied to
+   `sd:/_nds/TWiLightMenu/tempDSiWare.*`): check DSavE sees the files on the
+   flashcart after TWiLight has copied them back.
+9. **Unlaunch as TWiLight's DSiWare booter:** start DSavE from TWiLight (so
+   TWiLight first moves `.pub`/`.prv` back into `saves/`), and check DSavE
+   finds them there.
 
 ### Emulator saves
 

@@ -24,7 +24,7 @@
 #include "../core/sync.h"
 #include "gfx.h"
 
-#define APP_VERSION "0.5.0"
+#define APP_VERSION "0.6.0"
 
 #define SCREEN_W 256
 #define SCREEN_H 192
