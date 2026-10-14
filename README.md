@@ -12,8 +12,7 @@ saves without a PC.
 </p>
 
 > **Status: early.** It has not been tested on hardware yet, so keep your own
-> copy of anything precious. Physical-cartridge saves are still to come (see
-> [Roadmap](#roadmap)).
+> copy of anything precious.
 
 ## What it does
 
@@ -82,6 +81,19 @@ saves without a PC.
   can't tell which game a raw `.sav` belongs to, so check you picked the right
   one. no$gba saves are not supported yet.
 
+- **Backs up and restores game cards, in DSi mode.** On a DSi, or a 3DS with
+  TWiLight Menu++ or Unlaunch, start DSavE from the console's SD card and put a
+  retail game in slot 1. It shows up at the top of the list, and A and B back
+  it up and restore it like any other save. The card's backups share a folder
+  with the same game's ROM, so a flashcart save can go onto the card and back.
+  Every read is done twice and compared, every write is read back, and the
+  card's old save is kept as an auto backup. DSavE knows the 512 B, 8 KB,
+  64 KB and 128 KB EEPROMs, the 256 KB to 1 MB FLASH chips, and the infrared
+  cards (Pokemon HG/SS and B/W). Band Brothers DX's 8 MB chip and unknown chips
+  can be backed up but not written yet, and NAND saves (WarioWare D.I.Y.) are
+  not supported. On a DS or DS Lite, and from a flashcart, slot 1 holds the
+  flashcart, so this is not available.
+
 ## Controls
 
 Everything works with the buttons or the stylus.
@@ -93,7 +105,7 @@ Everything works with the buttons or the stylus.
 |---|---|---|
 | Games | Up/Down, Left/Right | Move, page (or tap and drag the list) |
 | | L/R | Choose a backup in the history |
-| | A | **Backup** the save now (named by date and time) |
+| | A | **Backup** the save now (named by date and time); on an empty game card row, check slot 1 again |
 | | B | **Restore** the chosen backup (hold A to confirm) |
 | | X | **Compress** or decompress the chosen backup |
 | | Y | **Rename/Delete**: rename, move to trash, export a `.sav` for PC, back up with a name, or import a `.sav` |
@@ -166,8 +178,11 @@ Pillow) into `source/ui/font_data.c`, which is committed.
 4. **Release**: hardware testing on DSpico and Ace3DS X, then a tagged
    release.
 
-Later: physical cartridge saves (DSi with Unlaunch, DS Lite hot-swap),
-DSiWare `.pub`/`.prv` saves, and format conversion (`.dsv`, `.duc`, no$gba).
+Since step 3: importing saves from a PC, keeping only the last few auto
+backups, and game card saves in DSi mode.
+
+Later: game cards on a DS Lite (hot-swap), the 8 MB Band Brothers DX chip,
+DSiWare `.pub`/`.prv` saves, and more formats (`.duc`, no$gba).
 
 ## License
 

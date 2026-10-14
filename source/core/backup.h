@@ -32,6 +32,8 @@ typedef enum {
     DSAVE_ERR_EXISTS,         // Target name is already taken
     DSAVE_ERR_ROLLED_BACK,    // Restore failed verification; old save put back
     DSAVE_ERR_UNSUPPORTED,    // The kernel has no such feature
+    DSAVE_ERR_CARD_CHANGED,   // The game card was removed or swapped
+    DSAVE_ERR_CARD,           // The game card's save chip did not respond
 } DsaveResult;
 
 const char *dsave_result_str(DsaveResult r);
@@ -61,6 +63,12 @@ DsaveResult backup_create(const Library *lib, const Game *game, const char *name
 // Same, from any save file of this game (e.g. another kernel's copy).
 DsaveResult backup_create_from(const Library *lib, const Game *game, const char *src,
                                const char *name, bool allow_blank, Backup *out);
+
+// Same, recording source_label in backup.ini as where the save came from
+// (when src is a temporary copy, e.g. of a game card's save chip).
+DsaveResult backup_create_labeled(const Library *lib, const Game *game, const char *src,
+                                  const char *source_label, const char *name, bool allow_blank,
+                                  Backup *out);
 
 // List a game's backups, newest first. Returns the count.
 int backup_list(const Library *lib, const Game *game, Backup *out, int max);
@@ -115,6 +123,9 @@ DsaveResult backup_trash(const Library *lib, const Game *game, const Backup *b);
 // the right save type.
 DsaveResult backup_export(const Library *lib, const Game *game, const Backup *b,
                           char *out_path, size_t out_size);
+
+// Name for a safety copy made before a restore: "auto_<timestamp>".
+void backup_auto_name(char *out, size_t size);
 
 // Auto backups beyond the newest `keep` for this game move to the trash.
 // protect (a backup name, or NULL) is always kept and counts towards keep.

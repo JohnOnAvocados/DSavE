@@ -41,6 +41,11 @@ typedef struct {
     // True when the active kernel's own save is missing and the primary is
     // another kernel's file.
     bool primary_is_fallback;
+
+    // The game card in slot 1 rather than a ROM on the SD card (see
+    // cardsave.h). It has no save locations; has_save means its save chip
+    // can be read, and save_size is the chip's size.
+    bool is_card;
 } Game;
 
 #define LIBRARY_MAX_GAMES 512
@@ -69,6 +74,9 @@ void library_free(Library *lib);
 //   2. otherwise the most recently modified existing save of any kernel;
 //   3. otherwise the active kernel's path, where a restore will create it.
 void library_refresh_game(const Library *lib, Game *game);
+
+// Number of ROMs found, not counting a game card entry.
+int library_rom_count(const Library *lib);
 
 // Change the active kernel and refresh every game.
 void library_set_kernel(Library *lib, KernelId id);

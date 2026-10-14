@@ -37,6 +37,8 @@ const char *dsave_result_str(DsaveResult r)
         case DSAVE_ERR_EXISTS:        return "That name is already used";
         case DSAVE_ERR_ROLLED_BACK:   return "Restore failed; old save kept";
         case DSAVE_ERR_UNSUPPORTED:   return "Not supported by this kernel";
+        case DSAVE_ERR_CARD_CHANGED:  return "The game card was removed or changed";
+        case DSAVE_ERR_CARD:          return "The game card's save chip did not answer";
     }
     return "Unknown error";
 }
@@ -144,21 +146,15 @@ DsaveResult backup_create(const Library *lib, const Game *game, const char *name
     return backup_create_from(lib, game, game->save_path, name, allow_blank, out);
 }
 
-static DsaveResult create_backup(const Library *lib, const Game *game, const char *src,
-                                 const char *source_label, const char *name, bool allow_blank,
-                                 Backup *out);
-
 DsaveResult backup_create_from(const Library *lib, const Game *game, const char *src,
                                const char *name, bool allow_blank, Backup *out)
 {
-    return create_backup(lib, game, src, src, name, allow_blank, out);
+    return backup_create_labeled(lib, game, src, src, name, allow_blank, out);
 }
 
-// source_label is what backup.ini records as the source (the original file
-// when src is a trimmed temporary copy).
-static DsaveResult create_backup(const Library *lib, const Game *game, const char *src,
-                                 const char *source_label, const char *name, bool allow_blank,
-                                 Backup *out)
+DsaveResult backup_create_labeled(const Library *lib, const Game *game, const char *src,
+                                  const char *source_label, const char *name, bool allow_blank,
+                                  Backup *out)
 {
     if (!file_exists(src))
         return DSAVE_ERR_NO_SAVE;
@@ -447,9 +443,8 @@ DsaveResult backup_restore_path(const Library *lib, Game *game, const Backup *b,
 
     // Safety copy of what is there now. Blank saves are kept too: losing a
     // blank save costs nothing, but refusing here would block the restore.
-    char auto_name[BACKUP_NAME_MAX + 1], stamp[24];
-    timestamp_now(stamp, sizeof(stamp));
-    snprintf(auto_name, sizeof(auto_name), AUTO_PREFIX "%s", stamp);
+    char auto_name[BACKUP_NAME_MAX + 1];
+    backup_auto_name(auto_name, sizeof(auto_name));
     Backup safety;
     r = backup_create_from(lib, game, target.path, auto_name, true, &safety);
     if (r != DSAVE_OK)
@@ -469,6 +464,13 @@ DsaveResult backup_restore_path(const Library *lib, Game *game, const Backup *b,
     write_save_stream(safety.file, safety.size, target.path, safety.size, NULL);
     library_refresh_game(lib, game);
     return DSAVE_ERR_ROLLED_BACK;
+}
+
+void backup_auto_name(char *out, size_t size)
+{
+    char stamp[24];
+    timestamp_now(stamp, sizeof(stamp));
+    snprintf(out, size, AUTO_PREFIX "%s", stamp);
 }
 
 DsaveResult backup_restore(const Library *lib, Game *game, const Backup *b,
@@ -736,7 +738,7 @@ DsaveResult backup_import(const Library *lib, const Game *game, const char *path
     snprintf(name, sizeof(name), "import_%s", stem);
 
     if (gz || len == file_size(path))
-        return create_backup(lib, game, path, path, name, true, out);
+        return backup_create_labeled(lib, game, path, path, name, true, out);
 
     // Trim the emulator footer into a temporary file first.
     char tmp[DSAVE_PATH_MAX];
@@ -755,7 +757,7 @@ DsaveResult backup_import(const Library *lib, const Game *game, const char *path
         fclose(in);
     if (o && fclose(o) != 0)
         ok = false;
-    DsaveResult r = ok ? create_backup(lib, game, tmp, path, name, true, out) : DSAVE_ERR_IO;
+    DsaveResult r = ok ? backup_create_labeled(lib, game, tmp, path, name, true, out) : DSAVE_ERR_IO;
     remove(tmp);
     return r;
 }

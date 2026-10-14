@@ -141,3 +141,21 @@ akmenu-next on an Ace3DS X):
    game loads. Copy the `.sav.gz` to a PC and check `gunzip` opens it.
 8. Note anything that differs and report it so the profile can be fixed and
    marked as tested.
+
+### Game cards (needs a DSi, or a 3DS with TWiLight Menu++)
+
+Start DSavE from TWiLight Menu++ on the console's SD card (not from a
+flashcart), with a retail game in slot 1.
+
+1. The card should be the first row in the list, with its chip type on the top
+   screen (for example "FLASH 512 KB + IR" for Pokemon HeartGold). If it says
+   "No game card" or "Couldn't read", note the game and what it says.
+2. Press A to back it up. Then play the game, save, and restore the backup with
+   B. Boot the card and check the old save loads.
+3. Try a small-save game too (most early games use a 512 B or 8 KB EEPROM), and
+   an infrared one (Pokemon HG/SS or B/W) if you have one.
+4. Take the card out with DSavE open and press A: it should say the card was
+   removed. Put it back and press A to check it again.
+5. Report the game code and the chip type DSavE shows for any card that fails,
+   so the chip table can be fixed. Back up anything precious with GodMode9i
+   first until this has been tested.

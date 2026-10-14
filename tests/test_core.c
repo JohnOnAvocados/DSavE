@@ -10,6 +10,7 @@
 #include <dirent.h>
 
 #include "../source/core/backup.h"
+#include "../source/core/cardsave.h"
 #include "../source/core/ini.h"
 #include "../source/core/kernel.h"
 #include "../source/core/library.h"
@@ -17,6 +18,8 @@
 #include "../source/core/savefile.h"
 #include "../source/core/sync.h"
 #include "../source/core/util.h"
+
+#include "fake_card.h"
 
 static int failures = 0;
 static int checks = 0;
@@ -1229,6 +1232,298 @@ static void test_prune_auto(void)
     CHECK(backup_prune_auto(&lib, g, 0, NULL) == 0);
 }
 
+// ---------------------------------------------------------------------------
+// Game card saves, against a fake save chip
+
+static FakeCard fc;
+static CardSlot slot;
+
+// Data that never repeats, so it can't be mistaken for address wrapping.
+static uint8_t chip_byte(long i, uint8_t seed)
+{
+    return (uint8_t)((((uint32_t)i * 2654435761u) >> 13) ^ seed);
+}
+
+static void fill_chip(long n, uint8_t seed)
+{
+    for (long i = 0; i < n; i++)
+        fc.mem[i] = chip_byte(i, seed);
+}
+
+static bool chip_is(long n, uint8_t seed)
+{
+    for (long i = 0; i < n; i++)
+    {
+        if (fc.mem[i] != chip_byte(i, seed))
+            return false;
+    }
+    return true;
+}
+
+static void test_card_detect(void)
+{
+    static const struct {
+        FakeChipType type;
+        long size;
+        uint32_t jedec;
+        bool ir, blank;
+        ChipType want;
+        long want_size;
+        bool guessed, writable;
+    } cases[] = {
+        { FAKE_EEPROM_TINY, 512, 0, false, false, CHIP_EEPROM_TINY, 512, false, true },
+        { FAKE_EEPROM, 8 * KB, 0, false, false, CHIP_EEPROM, 8 * KB, false, true },
+        { FAKE_EEPROM, 64 * KB, 0, false, false, CHIP_EEPROM, 64 * KB, false, true },
+        { FAKE_EEPROM, 8 * KB, 0, false, true, CHIP_EEPROM, 64 * KB, true, true },
+        { FAKE_EEPROM, 128 * KB, 0, false, false, CHIP_EEPROM, 128 * KB, false, true },
+        { FAKE_FLASH, 256 * KB, 0x204012, false, false, CHIP_FLASH, 256 * KB, false, true },
+        { FAKE_FLASH, 512 * KB, 0x621100, false, false, CHIP_FLASH, 512 * KB, false, true },
+        { FAKE_FLASH, 1024 * KB, 0x204014, false, false, CHIP_FLASH, 1024 * KB, false, true },
+        { FAKE_FLASH, 512 * KB, 0x204013, true, false, CHIP_FLASH, 512 * KB, false, true },
+        { FAKE_FLASH, 512 * KB, 0x123456, false, false, CHIP_FLASH, 512 * KB, false, false },
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++)
+    {
+        fake_card_init(&fc, "ABCE", "TEST", cases[i].type, cases[i].size, cases[i].jedec, cases[i].ir);
+        fake_card_slot(&fc, &slot);
+        if (!cases[i].blank)
+            fill_chip(cases[i].size, (uint8_t)i);
+        CardChip chip;
+        // The IR hint is wrong on purpose for odd cases: detection retries.
+        bool ok = card_chip_detect(&slot.bus, (i & 1) ? !cases[i].ir : cases[i].ir, &chip);
+        CHECK(ok && chip.type == cases[i].want && chip.size == cases[i].want_size);
+        if (!ok || chip.size != cases[i].want_size)
+            fprintf(stderr, "  case %zu: type %d size %ld\n", i, chip.type, chip.size);
+        CHECK(chip.size_guessed == cases[i].guessed && chip.writable == cases[i].writable);
+        CHECK(chip.infrared == cases[i].ir);
+        if (!ok || cases[i].blank)
+            continue;
+        // Reads across a 256-byte boundary come back right.
+        uint8_t buf[300];
+        long at = cases[i].size > 600 ? 250 : 100;
+        card_chip_read(&slot.bus, &chip, (uint32_t)at, buf, 300);
+        CHECK(memcmp(buf, fc.mem + at, 300) == 0);
+    }
+
+    char desc[32];
+    fake_card_init(&fc, "IPKE", "POKEMON HG", FAKE_FLASH, 512 * KB, 0x204013, true);
+    fake_card_slot(&fc, &slot);
+    CardChip chip;
+    CHECK(card_chip_detect(&slot.bus, true, &chip));
+    card_chip_describe(&chip, desc, sizeof(desc));
+    CHECK(strcmp(desc, "FLASH 512 KB + IR") == 0);
+
+    fake_card_init(&fc, "ABCE", "TEST", FAKE_NONE, 0, 0, false);
+    fake_card_slot(&fc, &slot);
+    CHECK(!card_chip_detect(&slot.bus, false, &chip) && chip.type == CHIP_NONE);
+}
+
+static void test_card_write(void)
+{
+    static const struct { FakeChipType type; long size; uint32_t jedec; bool ir; } cases[] = {
+        { FAKE_EEPROM_TINY, 512, 0, false },
+        { FAKE_EEPROM, 64 * KB, 0, false },
+        { FAKE_EEPROM, 128 * KB, 0, true },
+        { FAKE_FLASH, 256 * KB, 0x204012, false },
+        { FAKE_FLASH, 512 * KB, 0x204013, true },
+    };
+    static uint8_t data[256 * 1024];
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++)
+    {
+        fake_card_init(&fc, "ABCE", "TEST", cases[i].type, cases[i].size, cases[i].jedec, cases[i].ir);
+        fake_card_slot(&fc, &slot);
+        fill_chip(cases[i].size, 1); // Old data, so FLASH must erase first
+        CardChip chip;
+        CHECK(card_chip_detect(&slot.bus, cases[i].ir, &chip));
+        long n = cases[i].size < (long)sizeof(data) ? cases[i].size : (long)sizeof(data);
+        for (long j = 0; j < n; j++)
+            data[j] = (j >= 4096 && j < 8192) ? 0xFF : (uint8_t)(j * 31 + 7);
+        CHECK(card_chip_write(&slot.bus, &chip, 0, data, (uint32_t)n));
+        CHECK(memcmp(fc.mem, data, (size_t)n) == 0);
+        if (cases[i].type == FAKE_FLASH)
+        {
+            CHECK(fc.erases == n / CARD_FLASH_SECTOR);
+            CHECK(fc.page_writes == (n - 4096) / 256); // 0xFF pages skipped
+            // FLASH writes must start on a sector.
+            CHECK(!card_chip_write(&slot.bus, &chip, 256, data, 256));
+        }
+    }
+
+    // A blank 8 KB EEPROM: the size test finds 8 KB and leaves it blank.
+    fake_card_init(&fc, "ABCE", "TEST", FAKE_EEPROM, 8 * KB, 0, false);
+    fake_card_slot(&fc, &slot);
+    CardChip chip;
+    CHECK(card_chip_detect(&slot.bus, false, &chip) && chip.size_guessed);
+    CHECK(card_chip_test_size(&slot.bus, &chip) && chip.size == 8 * KB && !chip.size_guessed);
+    CHECK(fc.mem[0] == 0xFF);
+    fake_card_init(&fc, "ABCE", "TEST", FAKE_EEPROM, 64 * KB, 0, false);
+    fake_card_slot(&fc, &slot);
+    CHECK(card_chip_detect(&slot.bus, false, &chip) && chip.size_guessed);
+    CHECK(card_chip_test_size(&slot.bus, &chip) && chip.size == 64 * KB);
+}
+
+static void test_card_probe(void)
+{
+    new_card();
+    make_dir("_pico");
+    make_rom("roms/HeartGold.nds", "POKEMON HG", "IPKE", "Pokemon HeartGold");
+    make_dir("_DSavE/saves/AMCE Mario Kart DS");
+    library_scan(&lib, root);
+    int roms = lib.count;
+    CardInfo card;
+
+    // No slot (DS mode): no card entry.
+    card_probe(NULL, &card);
+    CHECK(card.status == CARD_UNAVAILABLE);
+    card_add_to_library(&lib, &card);
+    CHECK(lib.count == roms && !lib.games[0].is_card);
+
+    // Empty slot: an entry that says so.
+    fake_card_init(&fc, "IPKE", "POKEMON HG", FAKE_FLASH, 512 * KB, 0x204013, true);
+    fake_card_slot(&fc, &slot);
+    fc.slot_status = CARD_EMPTY;
+    card_probe(&slot, &card);
+    CHECK(card.status == CARD_EMPTY);
+    card_add_to_library(&lib, &card);
+    CHECK(lib.count == roms + 1 && lib.games[0].is_card && !lib.games[0].has_save);
+    CHECK(library_rom_count(&lib) == roms);
+
+    // A card whose ROM is on the SD card takes the ROM's title.
+    fc.slot_status = CARD_READY;
+    card_probe(&slot, &card);
+    CHECK(card.status == CARD_READY && strcmp(card.info.game_code, "IPKE") == 0);
+    CHECK(card.chip.infrared && card.chip.size == 512 * KB);
+    card_add_to_library(&lib, &card);
+    CHECK(lib.count == roms + 1); // Replaced, not added twice
+    Game *g = &lib.games[0];
+    CHECK(g->is_card && g->has_save && g->save_size == 512 * KB);
+    CHECK(strcmp(g->title, "Pokemon HeartGold") == 0);
+    library_refresh_game(&lib, g); // Leaves a card alone
+    CHECK(g->has_save && g->loc_count == 0);
+
+    // One with only a backup folder takes the folder's title; else the header's.
+    fake_card_init(&fc, "AMCE", "MARIOKARTDS", FAKE_EEPROM, 64 * KB, 0, false);
+    card_probe(&slot, &card);
+    card_add_to_library(&lib, &card);
+    CHECK(strcmp(lib.games[0].title, "Mario Kart DS") == 0);
+    fake_card_init(&fc, "AZEE", "ZELDA DS", FAKE_FLASH, 256 * KB, 0x204012, false);
+    card_probe(&slot, &card);
+    card_add_to_library(&lib, &card);
+    CHECK(strcmp(lib.games[0].title, "ZELDA DS") == 0);
+
+    // A bad header, NAND saves and no chip.
+    fc.header[0] ^= 1;
+    card_probe(&slot, &card);
+    CHECK(card.status == CARD_UNREADABLE);
+    fake_card_init(&fc, "UORE", "WARIOWAREDIY", FAKE_NONE, 0, 0, false);
+    card_probe(&slot, &card);
+    CHECK(card.status == CARD_NAND);
+    fake_card_init(&fc, "ABCE", "NOSAVE", FAKE_NONE, 0, 0, false);
+    card_probe(&slot, &card);
+    CHECK(card.status == CARD_NO_CHIP);
+
+    card_add_to_library(&lib, NULL);
+    CHECK(lib.count == roms && !lib.games[0].is_card);
+}
+
+static void count_progress(void *ctx, long done, long total)
+{
+    long *last = ctx;
+    if (done < last[0] || done > total)
+        last[1] = 1; // Went backwards or past the end
+    last[0] = done;
+    last[2] = total;
+}
+
+static void test_card_backup_restore(void)
+{
+    new_card();
+    make_dir("_pico");
+    make_rom("roms/HeartGold.nds", "POKEMON HG", "IPKE", "Pokemon HeartGold");
+    make_save("roms/HeartGold.sav", 512 * KB, 300 * KB, 9); // Flashcart copy
+    library_scan(&lib, root);
+    fake_card_init(&fc, "IPKE", "POKEMON HG", FAKE_FLASH, 512 * KB, 0x204013, true);
+    fake_card_slot(&fc, &slot);
+    fill_chip(512 * KB, 5);
+    CardInfo card;
+    card_probe(&slot, &card);
+    card_add_to_library(&lib, &card);
+    Game *g = &lib.games[0];
+
+    // Back up: the backup lands in the ROM's folder.
+    long prog[3] = { 0, 0, 0 };
+    CardProgress cp = { prog, count_progress };
+    Backup b;
+    CHECK(card_backup(&lib, &slot, g, NULL, false, &b, &cp) == DSAVE_OK);
+    CHECK(b.size == 512 * KB && prog[0] == prog[2] && prog[1] == 0);
+    char tmp[DSAVE_PATH_MAX];
+    p(tmp, "_DSavE/.card.tmp");
+    CHECK(!file_exists(tmp));
+    Game *rom = find_game("IPKE");
+    rom = rom == g ? &lib.games[1] : rom;
+    Backup list[BACKUP_LIST_MAX];
+    CHECK(backup_list(&lib, rom, list, BACKUP_LIST_MAX) == 1);
+    CHECK(list[0].crc32 == crc32_update(0, fc.mem, 512 * KB));
+
+    // Restore over changed data: only changed sectors are rewritten.
+    fill_chip(64 * KB, 6);
+    Backup safety;
+    prog[0] = 0;
+    CHECK(card_restore(&lib, &slot, g, &b, &safety, &cp) == DSAVE_OK);
+    CHECK(chip_is(512 * KB, 5) && fc.erases == 1);
+    CHECK(safety.is_auto && prog[0] == prog[2] && prog[1] == 0);
+    CHECK(backup_list(&lib, g, list, BACKUP_LIST_MAX) == 2);
+    int writes = fc.page_writes;
+    CHECK(card_restore(&lib, &slot, g, &b, NULL, NULL) == DSAVE_OK);
+    CHECK(fc.page_writes == writes); // Nothing to change
+
+    // The flashcart's padded save goes onto the card too.
+    Game *sd = &lib.games[1];
+    Backup from_sd;
+    CHECK(backup_create(&lib, sd, "flashcart", false, &from_sd) == DSAVE_OK);
+    CHECK(card_restore(&lib, &slot, g, &from_sd, NULL, NULL) == DSAVE_OK);
+    char sav[DSAVE_PATH_MAX];
+    p(sav, "roms/HeartGold.sav");
+    CHECK(crc32_update(0, fc.mem, 512 * KB) == crc_of(sav));
+
+    // Swapped card, loose card, read-only chip, write failure.
+    memcpy(fc.header + 0x0C, "IPGE", 4);
+    fake_card_init(&fc, "IPGE", "POKEMON SS", FAKE_FLASH, 512 * KB, 0x204013, true);
+    CHECK(card_backup(&lib, &slot, g, NULL, true, NULL, NULL) == DSAVE_ERR_CARD_CHANGED);
+    CHECK(card_restore(&lib, &slot, g, &b, NULL, NULL) == DSAVE_ERR_CARD_CHANGED);
+    fake_card_init(&fc, "IPKE", "POKEMON HG", FAKE_FLASH, 512 * KB, 0x204013, true);
+    fill_chip(512 * KB, 5);
+    fc.flaky_read = 9;
+    CHECK(card_backup(&lib, &slot, g, NULL, true, NULL, NULL) == DSAVE_ERR_CARD);
+    fc.flaky_read = 0;
+    fc.protect = true;
+    fill_chip(512 * KB, 7);
+    CHECK(card_restore(&lib, &slot, g, &b, NULL, NULL) == DSAVE_ERR_ROLLED_BACK);
+    CHECK(chip_is(512 * KB, 7));
+    fake_card_init(&fc, "IPKE", "POKEMON HG", FAKE_FLASH, 512 * KB, 0x654321, true);
+    CHECK(card_restore(&lib, &slot, g, &b, NULL, NULL) == DSAVE_ERR_UNSUPPORTED);
+
+    // A 512 KB backup with data past 256 KB can't go on a 256 KB chip.
+    fake_card_init(&fc, "IPKE", "POKEMON HG", FAKE_FLASH, 256 * KB, 0x204012, true);
+    CHECK(card_restore(&lib, &slot, g, &b, NULL, NULL) == DSAVE_ERR_BAD_SIZE);
+
+    // Blank 8 KB EEPROM: the restore settles the size first.
+    new_card();
+    library_scan(&lib, root);
+    fake_card_init(&fc, "ABCE", "SMALL", FAKE_EEPROM, 8 * KB, 0, false);
+    card_probe(&slot, &card);
+    card_add_to_library(&lib, &card);
+    g = &lib.games[0];
+    CHECK(card_backup(&lib, &slot, g, NULL, false, NULL, NULL) == DSAVE_WARN_BLANK);
+    make_dir("_DSavE/import");
+    make_save("_DSavE/import/small.sav", 8 * KB, 8 * KB, 3);
+    char imp[DSAVE_PATH_MAX];
+    p(imp, "_DSavE/import/small.sav");
+    CHECK(backup_import(&lib, g, imp, &b) == DSAVE_OK);
+    CHECK(card_restore(&lib, &slot, g, &b, NULL, NULL) == DSAVE_OK);
+    CHECK(crc32_update(0, fc.mem, 8 * KB) == crc_of(imp));
+}
+
 int main(void)
 {
     char tmpl[] = "/tmp/dsave-test-XXXXXX";
@@ -1257,6 +1552,10 @@ int main(void)
     test_titles();
     test_import();
     test_prune_auto();
+    test_card_detect();
+    test_card_write();
+    test_card_probe();
+    test_card_backup_restore();
 
     library_free(&lib);
     remove_tree(tmpl);

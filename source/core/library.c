@@ -50,6 +50,8 @@ int library_loc_for_kernel(const Game *game, KernelId id)
 
 void library_refresh_game(const Library *lib, Game *game)
 {
+    if (game->is_card)
+        return;
     const KernelSet *ks = &lib->kernels;
     game->loc_count = 0;
 
@@ -183,6 +185,11 @@ int library_scan(Library *lib, const char *root)
     scan_dir(lib, root, 0);
     qsort(lib->games, (size_t)lib->count, sizeof(Game), compare_games);
     return lib->count;
+}
+
+int library_rom_count(const Library *lib)
+{
+    return lib->count && lib->games[0].is_card ? lib->count - 1 : lib->count;
 }
 
 void library_free(Library *lib)

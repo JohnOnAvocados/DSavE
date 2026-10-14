@@ -155,6 +155,25 @@ static Backup *cur_backup(App *app)
     return &app->backups[app->hist_sel];
 }
 
+static bool on_card(App *app)
+{
+    Game *g = cur_game(app);
+    return g && g->is_card;
+}
+
+// Why the game card's save can't be used, or "".
+static const char *card_note(const App *app)
+{
+    switch (app->card.status)
+    {
+        case CARD_EMPTY:      return "No game card in slot 1. Insert one and press A";
+        case CARD_UNREADABLE: return "Couldn't read the game card. Reinsert it and press A";
+        case CARD_NO_CHIP:    return "This game card has no save chip DSavE can find";
+        case CARD_NAND:       return "This card keeps its save in NAND, which DSavE can't read yet";
+        default:              return "";
+    }
+}
+
 static void set_status(App *app, StatusKind kind, const char *fmt, ...)
 {
     va_list ap;
@@ -358,6 +377,48 @@ static void open_keyboard(App *app, UiOp op, const char *text)
     app->dirty = true;
 }
 
+// Look at slot 1 again and update the card's entry at the top of the list.
+static void check_card(App *app)
+{
+    Library *lib = app->lib;
+    bool had = lib->count && lib->games[0].is_card;
+    card_probe(app->card_slot, &app->card);
+    card_add_to_library(lib, &app->card);
+    bool has = lib->count && lib->games[0].is_card;
+    if (!had && has && app->game_sel > 0)
+        app->game_sel++;
+    else if (had && !has && app->game_sel > 0)
+        app->game_sel--;
+    app->game_sel = clampi(app->game_sel, 0, lib->count ? lib->count - 1 : 0);
+    keep_visible(app->game_sel, &app->game_scroll, GAME_ROWS, lib->count);
+    app->backups_game = -1;
+}
+
+static void card_found_status(App *app)
+{
+    if (app->card.status == CARD_READY)
+    {
+        char desc[32];
+        card_chip_describe(&app->card.chip, desc, sizeof(desc));
+        set_status(app, STATUS_OK, "Game card: %s, %s", app->lib->games[0].title, desc);
+    }
+    else
+        set_status(app, STATUS_ERROR, "%s", card_note(app));
+}
+
+// Redraw the progress bar mid-operation, at most every 1%.
+static void on_progress(void *ctx, long done, long total)
+{
+    App *app = ctx;
+    int p = total > 0 ? (int)(done * 1000 / total) : 0;
+    if (p < app->progress + 10 && p < 1000)
+        return;
+    app->progress = p;
+    app->dirty = true;
+    if (app->present)
+        app->present(app->present_user);
+}
+
 static void finish_backup(App *app, DsaveResult r, const Backup *made)
 {
     if (r == DSAVE_WARN_BLANK)
@@ -395,6 +456,7 @@ static void run_op(App *app, UiOp op)
     memset(&made, 0, sizeof(made));
     memset(&safety, 0, sizeof(safety));
     char msg[96];
+    CardProgress progress = { app, on_progress };
 
     switch (op)
     {
@@ -407,13 +469,26 @@ static void run_op(App *app, UiOp op)
             snprintf(root, sizeof(root), "%s", lib->root);
             library_scan(lib, root);
         }
+            card_probe(app->card_slot, &app->card);
+            card_add_to_library(lib, &app->card);
             app->game_sel = app->game_scroll = 0;
             app->backups_game = -1;
-            if (lib->count)
-                set_status(app, STATUS_OK, "Found %d game%s%s", lib->count, lib->count == 1 ? "" : "s",
-                           lib->truncated ? " (list is full)" : "");
-            else
-                set_status(app, STATUS_ERROR, "No DS games found on the card");
+            {
+                int roms = library_rom_count(lib);
+                const char *card = app->card.status == CARD_READY ? ", and a game card" : "";
+                if (roms)
+                    set_status(app, STATUS_OK, "Found %d game%s%s%s", roms, roms == 1 ? "" : "s", card,
+                               lib->truncated ? " (list is full)" : "");
+                else if (app->card.status == CARD_READY)
+                    card_found_status(app);
+                else
+                    set_status(app, STATUS_ERROR, "No DS games found on the card");
+            }
+            break;
+
+        case OP_CARD_CHECK:
+            check_card(app);
+            card_found_status(app);
             break;
 
         case OP_BACKUP:
@@ -423,8 +498,15 @@ static void run_op(App *app, UiOp op)
         case OP_BACKUP_BLANK:
             if (!g)
                 break;
-            finish_backup(app, backup_create(lib, g, app->kb_text, op == OP_BACKUP_BLANK, &made), &made);
+        {
+            DsaveResult r = g->is_card ? card_backup(lib, app->card_slot, g, app->kb_text, op == OP_BACKUP_BLANK,
+                                                     &made, &progress)
+                                       : backup_create(lib, g, app->kb_text, op == OP_BACKUP_BLANK, &made);
+            if (r == DSAVE_ERR_CARD_CHANGED)
+                check_card(app);
+            finish_backup(app, r, &made);
             break;
+        }
 
         case OP_BACKUP_COPY:
         {
@@ -453,11 +535,19 @@ static void run_op(App *app, UiOp op)
                 break;
             snprintf(msg, sizeof(msg), "%s", b->name);
             {
-                DsaveResult r = backup_restore(lib, g, b, &safety);
+                bool card = g->is_card;
+                DsaveResult r = card ? card_restore(lib, app->card_slot, g, b, &safety, &progress)
+                                     : backup_restore(lib, g, b, &safety);
+                if (r == DSAVE_ERR_CARD_CHANGED)
+                    check_card(app);
                 load_backups(app);
                 select_backup_named(app, msg);
-                result_status(app, r, safety.name[0] ? "Restored. The old save was kept as an Auto backup"
-                                                     : "Restored");
+                if (r == DSAVE_ERR_UNSUPPORTED && card)
+                    set_status(app, STATUS_ERROR, "DSavE can't write this card's save chip yet");
+                else
+                    result_status(app, r, card ? "Written to the game card. Its old save is an Auto backup"
+                                          : safety.name[0] ? "Restored. The old save was kept as an Auto backup"
+                                                           : "Restored");
             }
             break;
 
@@ -601,6 +691,14 @@ static void act_backup(App *app)
     Game *g = cur_game(app);
     if (!g)
         return;
+    if (g->is_card)
+    {
+        if (g->has_save)
+            queue(app, OP_BACKUP, "Reading the game card");
+        else
+            queue(app, OP_CARD_CHECK, "Checking the game card");
+        return;
+    }
     if (!g->has_save)
     {
         set_status(app, STATUS_ERROR, "No save to back up yet. Play the game first");
@@ -623,6 +721,17 @@ static void act_restore(App *app)
     char label[64], file[DSAVE_PATH_MAX];
     backup_label(b, label, sizeof(label));
     path_basename(file, sizeof(file), g->save_path);
+    if (g->is_card)
+    {
+        if (!g->has_save)
+            set_status(app, STATUS_ERROR, "%s", card_note(app));
+        else
+            confirm(app, OP_RESTORE, true, "Write to the game card?",
+                    "\"%s\" replaces the save on the card. Its current save is backed up first. "
+                    "Keep the card in until it's done.",
+                    label);
+        return;
+    }
     if (g->has_save)
         confirm(app, OP_RESTORE, true, "Restore this backup?",
                 "\"%s\" replaces the save in %s. The current save is backed up first.", label, file);
@@ -661,7 +770,9 @@ static void act_more(App *app)
 
 static void act_open_copies(App *app)
 {
-    if (cur_game(app))
+    if (on_card(app))
+        set_status(app, STATUS_ERROR, "Copies and slots are for saves on the SD card");
+    else if (cur_game(app))
         queue(app, OP_OPEN_COPIES, "Comparing the copies of this save");
 }
 
@@ -810,7 +921,7 @@ static bool more_enabled(App *app, int item)
     if (item == 3)
         return g && g->has_save;
     if (item == 4)
-        return g != NULL;
+        return g && g->info.game_code[0]; // An empty card slot has no game to import for
     return cur_backup(app) != NULL;
 }
 
@@ -879,6 +990,10 @@ static void dialog_accept(App *app)
         [OP_IMPORT] = "Importing the save",
     };
     const char *text = (size_t)op < sizeof(busy) / sizeof(busy[0]) && busy[op] ? busy[op] : "Working";
+    if (on_card(app) && op == OP_RESTORE)
+        text = "Writing to the game card";
+    else if (on_card(app) && op == OP_BACKUP_BLANK)
+        text = "Reading the game card";
     queue(app, op, text);
 }
 
@@ -1377,10 +1492,12 @@ static void input_modal(App *app, const UiInput *in)
     }
 }
 
-void app_init(App *app, Library *lib, const char *root)
+void app_init(App *app, Library *lib, const char *root, CardSlot *card_slot)
 {
     memset(app, 0, sizeof(*app));
     app->lib = lib;
+    app->card_slot = card_slot;
+    app->progress = -1;
     app->backups_game = -1;
     snprintf(lib->root, sizeof(lib->root), "%s", root);
     queue(app, OP_SCAN, "Scanning the SD card");
@@ -1392,8 +1509,13 @@ void app_update(App *app, const UiInput *in)
     {
         UiOp op = app->pending;
         app->pending = OP_NONE;
-        app->busy[0] = '\0';
+        app->running = true;
+        app->progress = -1;
         run_op(app, op);
+        app->running = false;
+        app->progress = -1;
+        if (app->pending == OP_NONE)
+            app->busy[0] = '\0';
         if (app->screen == SCREEN_MAIN)
             ensure_backups(app);
         app->touch_was = in->touching;
@@ -1575,7 +1697,7 @@ static void draw_status(Canvas *c, const App *app)
     gfx_fill(c, 0, STATUS_Y, SCREEN_W, SCREEN_H - STATUS_Y, C_PANEL);
     const char *text = app->status;
     Color col = app->status_kind == STATUS_OK ? C_OK : app->status_kind == STATUS_ERROR ? C_ERR : C_MUTED;
-    if (app->pending != OP_NONE)
+    if (app->pending != OP_NONE || app->running)
     {
         text = app->busy;
         col = C_ACCENT;
@@ -1592,8 +1714,37 @@ static void draw_status(Canvas *c, const App *app)
                  col == C_MUTED ? C_TEXT : col == C_FAINT ? C_FAINT : col);
 }
 
+static void draw_card_info(Canvas *c, const App *app, const Game *g)
+{
+    gfx_text_fit(c, &font_bold, 6, 23, SCREEN_W - 12, g->title, C_TEXT);
+    char line[96], desc[32];
+    if (g->has_save)
+    {
+        card_chip_describe(&app->card.chip, desc, sizeof(desc));
+        snprintf(line, sizeof(line), "%s  \xc2\xb7  Game card  \xc2\xb7  %s", g->info.game_code, desc);
+    }
+    else if (g->info.game_code[0])
+        snprintf(line, sizeof(line), "%s  \xc2\xb7  Game card", g->info.game_code);
+    else
+        snprintf(line, sizeof(line), "Game card in slot 1");
+    gfx_text_fit(c, &font_small, 6, 40, SCREEN_W - 12, line, C_MUTED);
+    if (!g->has_save)
+        draw_wrapped(c, &font_small, 6, 53, SCREEN_W - 12, card_note(app), C_WARN, 2);
+    else if (!app->card.chip.writable)
+        gfx_text_fit(c, &font_small, 6, 53, SCREEN_W - 12, "DSavE can back this chip up, but not write to it yet",
+                     C_WARN);
+    else
+        gfx_text_fit(c, &font_small, 6, 53, SCREEN_W - 12, "Keep the card in while DSavE reads or writes it",
+                     C_FAINT);
+}
+
 static void draw_game_info(Canvas *c, const App *app, const Game *g)
 {
+    if (g->is_card)
+    {
+        draw_card_info(c, app, g);
+        return;
+    }
     gfx_text_fit(c, &font_bold, 6, 23, SCREEN_W - 12, g->title, C_TEXT);
 
     char line[96], save[16], chip[16];
@@ -1778,7 +1929,8 @@ static void draw_bottom_main(Canvas *c, const App *app, const Ctls *ctls)
     draw_pill(c, app, find_ctl(ctls, ID_MENU), "START", "Menu");
     draw_pill(c, app, find_ctl(ctls, ID_COPIES), "SELECT", "Copies");
     char count[24];
-    snprintf(count, sizeof(count), "%d game%s", lib->count, lib->count == 1 ? "" : "s");
+    int roms = library_rom_count(lib);
+    snprintf(count, sizeof(count), "%d game%s", roms, roms == 1 ? "" : "s");
     const Ctl *m = find_ctl(ctls, ID_MENU), *cp = find_ctl(ctls, ID_COPIES);
     if (m && cp)
         gfx_text_center(c, &font_small, m->x + m->w, 4, cp->x - m->x - m->w, count, C_MUTED);
@@ -1797,13 +1949,24 @@ static void draw_bottom_main(Canvas *c, const App *app, const Ctls *ctls)
             gfx_rrect(c, 3, y + 1, SCREEN_W - 10, GAME_ROW_H - 2, 5, C_SELECT);
         else if (pressed(app, ID_ROW + i))
             gfx_rrect(c, 3, y + 1, SCREEN_W - 10, GAME_ROW_H - 2, 5, C_PANEL2);
-        if (g->has_save)
+        if (g->is_card)
+        {
+            // A little game card: notched corner, contacts along the bottom.
+            Color col = g->has_save ? C_ACCENT : C_FAINT;
+            gfx_rrect(c, 7, y + 4, 12, 13, 2, col);
+            gfx_fill(c, 15, y + 4, 4, 3, sel ? C_SELECT : C_BG);
+            for (int k = 0; k < 4; k++)
+                gfx_fill(c, 9 + k * 2, y + 13, 1, 3, sel ? C_SELECT : C_BG);
+        }
+        else if (g->has_save)
             gfx_disc(c, 9, y + 6, 8, g->primary_is_fallback ? C_WARN : C_OK);
         else
             gfx_ring(c, 9, y + 6, 8, 1, C_FAINT);
         char size[16];
         fmt_size(g->save_size, size, sizeof(size));
-        const char *right = g->has_save ? size : "no save";
+        const char *right = g->has_save ? size
+                            : g->is_card ? (app->card.status == CARD_EMPTY ? "empty" : "card")
+                                         : "no save";
         int rw = gfx_text_width(&font_small, right);
         gfx_text_right(c, &font_small, SCREEN_W - 12, y + 4, right, sel ? C_MUTED : C_FAINT);
         gfx_text_fit(c, &font_body, 23, y + 2, SCREEN_W - 12 - rw - 6 - 23, g->title, C_TEXT);
@@ -1814,7 +1977,10 @@ static void draw_bottom_main(Canvas *c, const App *app, const Ctls *ctls)
     gfx_fill(c, 0, BAR_Y - 3, SCREEN_W, SCREEN_H - BAR_Y + 3, C_PANEL);
     const Game *g = lib->count ? &lib->games[app->game_sel] : NULL;
     const Backup *b = app->backup_count && app->backups_game == app->game_sel ? &app->backups[app->hist_sel] : NULL;
-    draw_button(c, app, find_ctl(ctls, ID_ACT_A), "A", "Backup", g && g->has_save);
+    if (g && g->is_card && !g->has_save)
+        draw_button(c, app, find_ctl(ctls, ID_ACT_A), "A", "Check card", true);
+    else
+        draw_button(c, app, find_ctl(ctls, ID_ACT_A), "A", "Backup", g && g->has_save);
     draw_button(c, app, find_ctl(ctls, ID_ACT_B), "B", "Restore", b != NULL);
     draw_button(c, app, find_ctl(ctls, ID_ACT_X), "X", b && b->compressed ? "Decompress" : "Compress",
                 b && (b->compressed || b->size <= SAVEFILE_GZ_MAX));
@@ -2141,6 +2307,13 @@ static void draw_busy(Canvas *c, const App *app)
     draw_box(c, 28, 70, 200, 52);
     gfx_text_center(c, &font_bold, 28, 78, 200, "Working\xe2\x80\xa6", C_TEXT);
     gfx_text_center(c, &font_small, 28, 98, 200, app->busy, C_MUTED);
+    if (app->running && app->progress >= 0)
+    {
+        gfx_rrect(c, 48, 113, 160, 4, 2, C_PANEL2);
+        int w = app->progress * 160 / 1000;
+        if (w > 3)
+            gfx_rrect(c, 48, 113, w, 4, 2, C_ACCENT);
+    }
 }
 
 bool app_render(App *app, Canvas *top, Canvas *bottom)
@@ -2188,7 +2361,7 @@ bool app_render(App *app, Canvas *top, Canvas *bottom)
             draw_about(bottom);
             break;
     }
-    if (app->pending != OP_NONE)
+    if (app->pending != OP_NONE || app->running)
         draw_busy(bottom, app);
     return true;
 }

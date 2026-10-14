@@ -10,6 +10,8 @@
 #include "../source/core/util.h"
 #include "../source/ui/app.h"
 
+#include "fake_card.h"
+
 #include "../source/third_party/miniz/miniz_config.h"
 #include "../source/third_party/miniz/miniz.h"
 
@@ -35,6 +37,7 @@ static Library lib;
 static App app;
 static Color top_px[SCREEN_W * SCREEN_H], bottom_px[SCREEN_W * SCREEN_H];
 static Canvas top, bottom;
+static CardSlot *card_slot; // NULL: DS mode, no slot 1
 
 // ---------------------------------------------------------------------------
 // Fake SD card
@@ -162,7 +165,7 @@ static void type(const char *s)
 
 static void start_app(void)
 {
-    app_init(&app, &lib, root);
+    app_init(&app, &lib, root, card_slot);
     app.dirty = true;
     app_render(&app, &top, &bottom); // The "Scanning" frame
     settle();
@@ -510,6 +513,83 @@ static void test_fonts(void)
     CHECK(utf8_next(&s) == '?' && *s == '\0');
 }
 
+static FakeCard fc;
+static CardSlot slot;
+static int presents;
+static bool progress_shot;
+
+static void count_present(void *user)
+{
+    (void)user;
+    presents++;
+    app_render(&app, &top, &bottom);
+    if (!progress_shot && app.progress >= 400)
+    {
+        progress_shot = true;
+        shot("23_card_progress");
+    }
+}
+
+static void test_game_card(void)
+{
+    make_pico_card();
+    fake_card_init(&fc, "IPKE", "POKEMON HG", FAKE_FLASH, 512 * KB, 0x204013, true);
+    for (long i = 0; i < 512 * KB; i++)
+        fc.mem[i] = (uint8_t)(((uint32_t)i * 2654435761u) >> 13);
+    fake_card_slot(&fc, &slot);
+    card_slot = &slot;
+    start_app();
+    app.present = count_present;
+
+    // The card is the first row, named after the ROM with its game code.
+    CHECK(lib.count == 9 && lib.games[0].is_card && app.game_sel == 0);
+    CHECK(strcmp(game()->title, "POK\xc3\xa9MON HeartGold Version") == 0);
+    CHECK(status_ok() && strstr(app.status, "game card"));
+    shot("22_card");
+
+    // A reads the card into a backup, with a progress bar.
+    press(UI_KEY_A);
+    CHECK(status_ok() && app.backup_count == 1 && presents > 0);
+    uint32_t want = crc32_update(0, fc.mem, 512 * KB);
+    CHECK(app.backups[0].crc32 == want);
+
+    // B writes it back after a hold.
+    fc.mem[100] ^= 0x55;
+    press(UI_KEY_B);
+    CHECK(app.modal == MODAL_CONFIRM && app.dlg_hold);
+    shot("24_card_restore");
+    hold(UI_KEY_A, 70);
+    CHECK(status_ok() && crc32_update(0, fc.mem, 512 * KB) == want);
+    CHECK(app.backup_count == 2 && progress_shot);
+    shot("25_card_written");
+
+    // The ROM on the SD card shares the card's backups.
+    select_game("IPKE");
+    CHECK(app.game_sel == 0); // The card comes first
+    while (app.game_sel == 0 || strcmp(game()->info.game_code, "IPKE") != 0)
+        press(UI_KEY_DOWN);
+    CHECK(!game()->is_card && app.backup_count == 2);
+    while (app.game_sel != 0)
+        press(UI_KEY_UP);
+
+    // Copies are for SD saves.
+    press(UI_KEY_SELECT);
+    CHECK(app.screen == SCREEN_MAIN && app.status_kind == STATUS_ERROR);
+
+    // Take the card out: the next backup notices, A checks again.
+    fc.slot_status = CARD_EMPTY;
+    press(UI_KEY_A);
+    CHECK(app.status_kind == STATUS_ERROR && game()->is_card && !game()->has_save);
+    press(UI_KEY_A);
+    CHECK(app.status_kind == STATUS_ERROR && strstr(app.status, "No game card"));
+    shot("26_card_empty");
+    fc.slot_status = CARD_READY;
+    press(UI_KEY_A);
+    CHECK(status_ok() && game()->has_save);
+
+    card_slot = NULL;
+}
+
 int main(int argc, char **argv)
 {
     if (argc > 1)
@@ -528,6 +608,7 @@ int main(int argc, char **argv)
     test_touch();
     test_empty_card();
     test_import();
+    test_game_card();
 
     remove_tree(base);
     library_free(&lib);

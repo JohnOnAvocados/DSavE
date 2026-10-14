@@ -14,6 +14,7 @@
 #include <stdint.h>
 
 #include "../core/backup.h"
+#include "../core/cardsave.h"
 #include "../core/library.h"
 #include "../core/sync.h"
 #include "gfx.h"
@@ -82,6 +83,7 @@ typedef enum {
     OP_BACKUP_COPY,   // Back up the selected copy instead of the primary save
     OP_USE_SLOT,
     OP_IMPORT,
+    OP_CARD_CHECK,    // Look at slot 1 again
 } UiOp;
 
 typedef enum {
@@ -134,10 +136,22 @@ typedef struct {
     bool touch_drag;
     int touch_x0, touch_y0, touch_xlast, touch_ylast, touch_scroll0;
     int touch_hit, touch_now_hit;
+
+    // Slot 1, or NULL where it can't be used. The game card, when there is
+    // one, is lib->games[0] (is_card), and card holds what was found.
+    CardSlot *card_slot;
+    CardInfo card;
+
+    // Long work (game card reads and writes) shows a progress bar. The
+    // platform sets present to draw and show a frame mid-operation.
+    bool running;
+    int progress;     // 0-1000, or -1 for none
+    void (*present)(void *user);
+    void *present_user;
 } App;
 
-// Set up and queue the first scan of root.
-void app_init(App *app, Library *lib, const char *root);
+// Set up and queue the first scan of root. card_slot may be NULL.
+void app_init(App *app, Library *lib, const char *root, CardSlot *card_slot);
 
 // One frame of input. Runs queued work first.
 void app_update(App *app, const UiInput *in);

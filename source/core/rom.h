@@ -20,6 +20,10 @@ typedef struct {
 // for ROM files and for game cards read from slot 1.
 void rom_parse(RomInfo *info, const uint8_t *header, const uint8_t *titles);
 
+// True if the header's CRC-16 (at 0x15E, over 0x000-0x15D) is right. A
+// header read from a dirty or half-inserted game card fails this.
+bool rom_header_crc_ok(const uint8_t *header);
+
 // Fill info from the ROM at path. Returns false if the file is not readable
 // or is too short to be an .nds. A missing or odd banner is not an error;
 // banner_title is then left empty. The banner title is the first of

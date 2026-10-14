@@ -11,11 +11,11 @@ test: test_core test_ui
 	./test_core
 	./test_ui screenshots
 
-test_core: test_core.c $(SRC) $(MINIZ) $(HEADERS)
-	$(CC) $(CFLAGS) -o $@ test_core.c $(SRC) $(MINIZ)
+test_core: test_core.c fake_card.c fake_card.h $(SRC) $(MINIZ) $(HEADERS)
+	$(CC) $(CFLAGS) -o $@ test_core.c fake_card.c $(SRC) $(MINIZ)
 
-test_ui: test_ui.c $(SRC) $(UI) $(MINIZ) $(HEADERS)
-	$(CC) $(CFLAGS) -o $@ test_ui.c $(SRC) $(UI) $(MINIZ)
+test_ui: test_ui.c fake_card.c fake_card.h $(SRC) $(UI) $(MINIZ) $(HEADERS)
+	$(CC) $(CFLAGS) -o $@ test_ui.c fake_card.c $(SRC) $(UI) $(MINIZ)
 
 clean:
 	rm -rf test_core test_ui screenshots
