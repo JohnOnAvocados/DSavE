@@ -7,6 +7,11 @@
 // open it directly. With compression on it is <title>.sav.gz instead, a
 // standard gzip file. backup.ini records its size and CRC-32, which restore
 // checks before it touches the live save.
+//
+// A DSiWare title's backup holds each of its save files under the names
+// they have on a DSi, public.sav, private.sav and banner.sav, and
+// backup.ini records each one's size and CRC-32 too. They are never
+// compressed.
 
 #ifndef DSAVE_BACKUP_H
 #define DSAVE_BACKUP_H
@@ -41,6 +46,7 @@ typedef enum {
     DSAVE_ERR_ROLLBACK_FAILED,// Restore failed and the old save could not be put
                               // back; the auto backup holds it
     DSAVE_ERR_GONE,           // The backup or game it needs is no longer there
+    DSAVE_ERR_DSIWARE,        // Not something a DSiWare save can do (.dsv, gzip)
 } DsaveResult;
 
 const char *dsave_result_str(DsaveResult r);
@@ -58,6 +64,15 @@ typedef struct {
     bool compressed;              // Stored as <title>.sav.gz
     char note[BACKUP_NOTE_MAX + 1]; // The user's note, "" for none
     bool keep;                    // Never pruned or trashed while set
+
+    // A DSiWare backup: file is its main part (public.sav, else
+    // private.sav, else banner.sav), and size and crc32 describe that one.
+    bool dsiware;
+    long part_size[DSI_PARTS];    // -1 for a part it doesn't hold
+    uint32_t part_crc[DSI_PARTS];
+    // Not a backup but a game's save location (file is its path), when a
+    // copy from another kernel is restored like a backup (sync.h).
+    bool live;
 } Backup;
 
 // Paths under <root>/_DSavE.
@@ -79,6 +94,18 @@ DsaveResult backup_create_labeled(const Library *lib, const Game *game, const ch
                                   const char *source_label, const char *name, bool allow_blank,
                                   Backup *out);
 
+// The file holding part p of a DSiWare save in b: its part file, the live
+// file beside a location's main file, or for a one-file backup of a DSiWare
+// title (imported, or made by DSavE before 0.6), the file itself as the
+// title's main part. False when b doesn't hold that part.
+bool backup_dsi_part_file(const Game *game, const Backup *b, DsiPart part, char *out, size_t size);
+
+// "public.sav", "private.sav", "banner.sav"
+const char *backup_dsi_part_name(DsiPart part);
+
+// The save data a backup holds: every part of a DSiWare backup, else size.
+long backup_data_size(const Backup *b);
+
 // List a game's backups, newest first. Returns the count.
 int backup_list(const Library *lib, const Game *game, Backup *out, int max);
 
@@ -94,6 +121,14 @@ DsaveResult backup_validate(const Backup *b);
 //   4. read it back and compare CRCs; on mismatch, put the old save back.
 // If the game has no save yet, a new file is created where the active kernel
 // expects it. auto_backup receives the safety copy when one was made.
+//
+// For a DSiWare title every save file it uses is restored, each in place
+// and each at exactly the size of the backup's file: they are FAT images of
+// the size the title's header gives, so they are never padded with 0xFF,
+// and a file shorter than the header's size is refused (DSAVE_ERR_BAD_SIZE).
+// A part the backup lacks is left as it is, and a missing file is created.
+// If any file fails to verify, every file is put back as it was, and files
+// the restore created are removed.
 DsaveResult backup_restore(const Library *lib, Game *game, const Backup *b,
                            Backup *auto_backup);
 
@@ -116,7 +151,8 @@ long backup_restore_length(const char *backup_file, long backup_size, long live_
 
 // Compress a backup to .sav.gz, or decompress it back to a raw .sav. The new
 // file is written and verified before the old one is removed. Saves larger
-// than SAVEFILE_GZ_MAX are left raw (DSAVE_ERR_UNSUPPORTED).
+// than SAVEFILE_GZ_MAX are left raw (DSAVE_ERR_UNSUPPORTED), and DSiWare
+// backups too (DSAVE_ERR_DSIWARE).
 DsaveResult backup_set_compressed(const Backup *b, bool compress, Backup *out);
 
 // Rename a backup's folder.
@@ -146,6 +182,11 @@ typedef enum {
 // game is replaced. When the chip size is known (Pico's save list, or a
 // game card) and the rest of the file is only a kernel's 0xFF padding, the
 // export is trimmed to it so emulators detect the right save type.
+//
+// A DSiWare backup is exported as "<ROM file name>.pub", ".prv" and ".bnr",
+// the names Pico Loader and TWiLight Menu++ look for beside the ROM, and
+// out_path names the main one. There is no .dsv for DSiWare
+// (DSAVE_ERR_DSIWARE).
 DsaveResult backup_export(const Library *lib, const Game *game, const Backup *b, ExportFormat format,
                           char *out_path, size_t out_size);
 
@@ -177,15 +218,25 @@ typedef struct {
     bool valid;       // size is a DS save size
     EmuFormat format;
     int game;         // Index of the game whose ROM has the same file name, or -1
+    bool dsiware;     // A DSiWare save file (.pub, .prv or .bnr); the files
+                      // beside it with the same name come along
 } ImportFile;
 
-// List the files in the import folder (creating it), sorted by name.
+// List the files in the import folder (creating it), sorted by name. The
+// parts of one DSiWare save ("X.pub", "X.prv", "X.bnr") are listed once,
+// by the first of them.
 int backup_import_list(const Library *lib, ImportFile *out, int max);
 
 // Make a backup named "import_<file name>" from an import file. The file
 // is left where it is. A save's data doesn't say which game it is from, so
 // the caller picks the game: the one named after it (ImportFile.game), or
 // the user's choice.
+//
+// For a DSiWare title, a .pub, .prv or .bnr brings the other files of the
+// same name with it, and a raw .sav (or an emulator file) is taken as its
+// public save (its private one if it has none). Each file must be the size
+// the title's header gives (DSAVE_ERR_BAD_SIZE). A DSiWare file can't go
+// into a game that isn't DSiWare (DSAVE_ERR_WRONG_GAME).
 DsaveResult backup_import(const Library *lib, const Game *game, const char *path, Backup *out);
 
 #endif

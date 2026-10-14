@@ -2370,6 +2370,503 @@ static void test_emulator_formats(void)
     CHECK(backup_import(&lib, other, files[0].path, &b) == DSAVE_OK && strcmp(b.name, "import_game") == 0);
 }
 
+// ---------------------------------------------------------------------------
+// DSiWare
+
+// A DSiWare ROM: a DSi header (unit code 3, title ID 00030004) giving the
+// public and private save sizes and the banner save flag, and a banner
+// with the English title.
+static void make_dsi_header(uint8_t *hdr, const char *code, uint32_t tid_hi, uint8_t unit, uint32_t pub,
+                            uint32_t prv, bool banner_save)
+{
+    memset(hdr, 0, ROM_DSI_HEADER_SIZE);
+    memcpy(hdr, "DSIWARE", 7);
+    memcpy(hdr + 0x0C, code, 4);
+    hdr[0x12] = unit;
+    hdr[0x1BF] = banner_save ? 0x04 : 0;
+    put_le32(hdr + 0x230, (uint32_t)code[3] | ((uint32_t)code[2] << 8) | ((uint32_t)code[1] << 16) |
+                              ((uint32_t)code[0] << 24));
+    put_le32(hdr + 0x234, tid_hi);
+    put_le32(hdr + 0x238, pub);
+    put_le32(hdr + 0x23C, prv);
+}
+
+static void make_dsi_rom(const char *rel, const char *code, const char *banner_title, uint32_t pub, uint32_t prv,
+                         bool banner_save)
+{
+    static uint8_t rom[0x1000 + 0xA00];
+    memset(rom, 0, sizeof(rom));
+    make_dsi_header(rom, code, 0x00030004, 0x03, pub, prv, banner_save);
+    put_le32(rom + 0x68, 0x1000);
+    uint8_t *en = rom + 0x1000 + 0x240 + 0x100;
+    for (size_t i = 0; banner_title[i]; i++)
+        en[i * 2] = (uint8_t)banner_title[i];
+    write_bytes(rel, rom, sizeof(rom));
+}
+
+#define DSI_PUB (192 * KB) // Not a power of two, as DSiWare sizes often aren't
+#define DSI_PRV (16 * KB)
+
+static void test_dsiware_detection(void)
+{
+    static uint8_t hdr[ROM_DSI_HEADER_SIZE];
+    RomInfo info;
+
+    make_dsi_header(hdr, "KAAE", 0x00030004, 0x03, (uint32_t)DSI_PUB, (uint32_t)DSI_PRV, true);
+    memset(&info, 0, sizeof(info));
+    rom_parse_dsi(&info, hdr);
+    CHECK(info.dsiware && info.dsi_public_size == DSI_PUB && info.dsi_private_size == DSI_PRV &&
+          info.dsi_banner_save);
+    CHECK(rom_dsi_part_size(&info, DSI_PUBLIC) == DSI_PUB && rom_dsi_part_size(&info, DSI_PRIVATE) == DSI_PRV);
+    CHECK(rom_dsi_part_size(&info, DSI_BANNER) == DSI_BANNER_SAVE_SIZE);
+
+    // System titles (00030005) count; DSi-enhanced game cards (00030000)
+    // and DS-only headers (unit code 0) don't.
+    make_dsi_header(hdr, "HNEE", 0x00030005, 0x03, 0, (uint32_t)DSI_PRV, false);
+    memset(&info, 0, sizeof(info));
+    rom_parse_dsi(&info, hdr);
+    CHECK(info.dsiware && !rom_dsi_has_part(&info, DSI_PUBLIC) && rom_dsi_has_part(&info, DSI_PRIVATE) &&
+          !rom_dsi_has_part(&info, DSI_BANNER));
+    make_dsi_header(hdr, "IRBO", 0x00030000, 0x02, (uint32_t)DSI_PUB, 0, false);
+    memset(&info, 0, sizeof(info));
+    rom_parse_dsi(&info, hdr);
+    CHECK(!info.dsiware && !rom_dsi_has_part(&info, DSI_PUBLIC));
+    make_dsi_header(hdr, "KAAE", 0x00030004, 0x00, (uint32_t)DSI_PUB, 0, false);
+    memset(&info, 0, sizeof(info));
+    rom_parse_dsi(&info, hdr);
+    CHECK(!info.dsiware);
+
+    // From a file; a header too short for the DSi part is a DS ROM.
+    new_card();
+    make_dsi_rom("dsiware/Art Style.nds", "KAAE", "Art Style: AQUARIO", (uint32_t)DSI_PUB, (uint32_t)DSI_PRV, true);
+    char path[DSAVE_PATH_MAX];
+    p(path, "dsiware/Art Style.nds");
+    CHECK(rom_read_info(path, &info) && info.dsiware && strcmp(info.game_code, "KAAE") == 0 &&
+          strcmp(info.banner_title, "Art Style: AQUARIO") == 0 && info.dsi_public_size == DSI_PUB);
+    make_dsi_header(hdr, "KAAE", 0x00030004, 0x03, (uint32_t)DSI_PUB, 0, false);
+    write_bytes("short.nds", hdr, 0x200);
+    p(path, "short.nds");
+    CHECK(rom_read_info(path, &info) && !info.dsiware);
+}
+
+static void test_dsiware_paths(void)
+{
+    KernelSet ks;
+    char out[DSAVE_PATH_MAX], rom[DSAVE_PATH_MAX];
+    new_card();
+    make_dir("_pico");
+    make_dir("TTMenu");
+    make_text("_nds/TWiLightMenu/settings.ini", "[SRLOADER]\nSAVE_LOCATION = 0\n");
+    p(rom, "dsiware/Game.nds");
+    kernels_detect(&ks, root);
+
+    // Pico Loader: the ROM's extension swapped, beside it, no slots.
+    CHECK(kernel_dsiware_path(&ks, KERNEL_PICO, rom, 0, DSI_LAYOUT_SIDECAR, DSI_PUBLIC, out, sizeof(out)));
+    CHECK(path_is(out, "dsiware/Game.pub"));
+    CHECK(kernel_dsiware_path(&ks, KERNEL_PICO, rom, 0, DSI_LAYOUT_SIDECAR, DSI_PRIVATE, out, sizeof(out)));
+    CHECK(path_is(out, "dsiware/Game.prv"));
+    CHECK(kernel_dsiware_path(&ks, KERNEL_PICO, rom, 0, DSI_LAYOUT_SIDECAR, DSI_BANNER, out, sizeof(out)));
+    CHECK(path_is(out, "dsiware/Game.bnr"));
+    CHECK(!kernel_dsiware_path(&ks, KERNEL_PICO, rom, 1, DSI_LAYOUT_SIDECAR, DSI_PUBLIC, out, sizeof(out)));
+    CHECK(!kernel_dsiware_path(&ks, KERNEL_PICO, rom, 0, DSI_LAYOUT_SAV, DSI_PUBLIC, out, sizeof(out)));
+
+    // TWiLight: saves/ folder; slot N is .puN, .prN, .bnN (or .savN).
+    CHECK(kernel_dsiware_path(&ks, KERNEL_TWILIGHT, rom, 0, DSI_LAYOUT_SIDECAR, DSI_PUBLIC, out, sizeof(out)));
+    CHECK(path_is(out, "dsiware/saves/Game.pub"));
+    CHECK(kernel_dsiware_path(&ks, KERNEL_TWILIGHT, rom, 3, DSI_LAYOUT_SIDECAR, DSI_PRIVATE, out, sizeof(out)));
+    CHECK(path_is(out, "dsiware/saves/Game.pr3"));
+    CHECK(kernel_dsiware_path(&ks, KERNEL_TWILIGHT, rom, 3, DSI_LAYOUT_SIDECAR, DSI_BANNER, out, sizeof(out)));
+    CHECK(path_is(out, "dsiware/saves/Game.bn3"));
+    CHECK(kernel_dsiware_path(&ks, KERNEL_TWILIGHT, rom, 0, DSI_LAYOUT_SAV, DSI_PUBLIC, out, sizeof(out)));
+    CHECK(path_is(out, "dsiware/saves/Game.sav"));
+    CHECK(kernel_dsiware_path(&ks, KERNEL_TWILIGHT, rom, 2, DSI_LAYOUT_SAV, DSI_PRIVATE, out, sizeof(out)));
+    CHECK(path_is(out, "dsiware/saves/Game.sav2"));
+    CHECK(kernel_dsiware_path(&ks, KERNEL_TWILIGHT, rom, 2, DSI_LAYOUT_SAV, DSI_BANNER, out, sizeof(out)));
+    CHECK(path_is(out, "dsiware/saves/Game.bn2"));
+
+    // DS-mode kernels don't run DSiWare.
+    CHECK(!kernel_runs_dsiware(KERNEL_YSMENU));
+    CHECK(!kernel_dsiware_path(&ks, KERNEL_YSMENU, rom, 0, DSI_LAYOUT_SIDECAR, DSI_PUBLIC, out, sizeof(out)));
+    kernels_free(&ks);
+
+    make_text("_nds/TWiLightMenu/settings.ini", "[SRLOADER]\nSAVE_LOCATION = 2\n");
+    kernels_detect(&ks, root);
+    CHECK(kernel_dsiware_path(&ks, KERNEL_TWILIGHT, rom, 1, DSI_LAYOUT_SIDECAR, DSI_PUBLIC, out, sizeof(out)));
+    CHECK(path_is(out, "_nds/TWiLightMenu/saves/Game.pu1"));
+    kernels_free(&ks);
+    make_text("_nds/TWiLightMenu/settings.ini", "[SRLOADER]\nSAVE_LOCATION = 1\n");
+    kernels_detect(&ks, root);
+    CHECK(kernel_dsiware_path(&ks, KERNEL_TWILIGHT, rom, 0, DSI_LAYOUT_SIDECAR, DSI_BANNER, out, sizeof(out)));
+    CHECK(path_is(out, "dsiware/Game.bnr"));
+    CHECK(!kernel_dsiware_path(&ks, KERNEL_TWILIGHT, rom, 1, DSI_LAYOUT_SIDECAR, DSI_PUBLIC, out, sizeof(out)));
+    kernels_free(&ks);
+
+    // The library: Pico's files, TWiLight's layout from the files it made,
+    // else from the console's mode. YSMenu has no location.
+    make_text("_nds/TWiLightMenu/settings.ini", "[SRLOADER]\nSAVE_LOCATION = 0\n");
+    make_dsi_rom("dsiware/Game.nds", "KGME", "DSi Game", (uint32_t)DSI_PUB, (uint32_t)DSI_PRV, true);
+    make_file("dsiware/Game.pub", DSI_PUB, 1);
+    make_file("dsiware/Game.prv", DSI_PRV, 2);
+    make_file("dsiware/Game.bnr", DSI_BANNER_SAVE_SIZE, 3);
+    lib.dsi_mode = false;
+    library_scan(&lib, root);
+    Game *g = find_game("KGME");
+    CHECK(g && g->info.dsiware);
+    if (!g)
+        return;
+    CHECK(g->loc_count == 2);
+    int pico = library_loc_for_kernel(g, KERNEL_PICO), twl = library_loc_for_kernel(g, KERNEL_TWILIGHT);
+    CHECK(pico >= 0 && twl >= 0 && library_loc_for_kernel(g, KERNEL_YSMENU) < 0);
+    CHECK(path_is(g->locs[pico].path, "dsiware/Game.pub"));
+    CHECK(g->locs[pico].exists && g->locs[pico].size == DSI_PUB + DSI_PRV + DSI_BANNER_SAVE_SIZE);
+    CHECK(path_is(g->locs[twl].path, "dsiware/saves/Game.sav") && !g->locs[twl].exists);
+    CHECK(g->has_save && path_is(g->save_path, "dsiware/Game.pub")); // Pico is active
+    CHECK(library_dsi_part_path(g, g->locs[pico].path, DSI_PRIVATE, out, sizeof(out)) &&
+          path_is(out, "dsiware/Game.prv"));
+    // The SAV layout keeps the public save only, plus the banner.
+    CHECK(!library_dsi_part_path(g, g->locs[twl].path, DSI_PRIVATE, out, sizeof(out)));
+    CHECK(library_dsi_part_path(g, g->locs[twl].path, DSI_PUBLIC, out, sizeof(out)) &&
+          path_is(out, "dsiware/saves/Game.sav"));
+    CHECK(library_dsi_part_path(g, g->locs[twl].path, DSI_BANNER, out, sizeof(out)) &&
+          path_is(out, "dsiware/saves/Game.bnr"));
+
+    lib.dsi_mode = true;
+    library_refresh_game(&lib, g);
+    twl = library_loc_for_kernel(g, KERNEL_TWILIGHT);
+    CHECK(path_is(g->locs[twl].path, "dsiware/saves/Game.pub"));
+    lib.dsi_mode = false;
+    make_file("dsiware/saves/Game.prv", DSI_PRV, 4); // TWiLight in DSi mode made one
+    library_refresh_game(&lib, g);
+    twl = library_loc_for_kernel(g, KERNEL_TWILIGHT);
+    CHECK(path_is(g->locs[twl].path, "dsiware/saves/Game.pub") && g->locs[twl].exists &&
+          g->locs[twl].size == DSI_PRV);
+
+    // TWiLight slots follow SAVE_NUMBER.
+    make_text("_nds/TWiLightMenu/gamesettings/Game.nds.ini", "[GAMESETTINGS]\nSAVE_NUMBER = 4\n");
+    lib.kernels.active = KERNEL_TWILIGHT;
+    library_refresh_game(&lib, g);
+    twl = library_loc_for_kernel(g, KERNEL_TWILIGHT);
+    CHECK(path_is(g->locs[twl].path, "dsiware/saves/Game.sav4"));
+    SaveSlot slots[SLOT_MAX];
+    int n = slots_list(&lib, g, KERNEL_TWILIGHT, slots, SLOT_MAX);
+    CHECK(n == 10 && path_is(slots[0].path, "dsiware/saves/Game.pub") && slots[0].exists &&
+          slots[4].current && !slots[4].exists);
+}
+
+// A Pico card with one DSiWare game, its three files beside the ROM.
+static Game *dsi_card(uint8_t seed)
+{
+    new_card();
+    make_dir("_pico");
+    make_dsi_rom("dsiware/Game.nds", "KGME", "DSi Game", (uint32_t)DSI_PUB, (uint32_t)DSI_PRV, true);
+    make_file("dsiware/Game.pub", DSI_PUB, seed);
+    make_file("dsiware/Game.prv", DSI_PRV, (uint8_t)(seed + 1));
+    make_file("dsiware/Game.bnr", DSI_BANNER_SAVE_SIZE, (uint8_t)(seed + 2));
+    lib.dsi_mode = false;
+    library_scan(&lib, root);
+    return find_game("KGME");
+}
+
+static bool part_is(const Backup *b, DsiPart part, uint32_t crc, long size)
+{
+    char path[DSAVE_PATH_MAX];
+    path_join(path, sizeof(path), b->dir, backup_dsi_part_name(part));
+    return b->part_size[part] == size && b->part_crc[part] == crc && crc_of(path) == crc && file_size(path) == size;
+}
+
+static void test_dsiware_backup_restore(void)
+{
+    Game *g = dsi_card(10);
+    CHECK(g != NULL);
+    if (!g)
+        return;
+    uint32_t pub = crc_of_rel("dsiware/Game.pub"), prv = crc_of_rel("dsiware/Game.prv"),
+             bnr = crc_of_rel("dsiware/Game.bnr");
+
+    // One backup holds every file; backup.ini records each one.
+    CHECK(library_set_compress(&lib, true)); // DSiWare stays raw anyway
+    Backup b;
+    CHECK(backup_create(&lib, g, "first", false, &b) == DSAVE_OK);
+    CHECK(library_set_compress(&lib, false));
+    CHECK(b.dsiware && !b.compressed && b.has_meta);
+    CHECK(path_is(b.file, "_DSavE/saves/KGME DSi Game/first/public.sav"));
+    CHECK(b.size == DSI_PUB && b.crc32 == pub);
+    CHECK(part_is(&b, DSI_PUBLIC, pub, DSI_PUB) && part_is(&b, DSI_PRIVATE, prv, DSI_PRV) &&
+          part_is(&b, DSI_BANNER, bnr, DSI_BANNER_SAVE_SIZE));
+    CHECK(backup_data_size(&b) == DSI_PUB + DSI_PRV + DSI_BANNER_SAVE_SIZE);
+    char ini[DSAVE_PATH_MAX], line[48];
+    path_join(ini, sizeof(ini), b.dir, "backup.ini");
+    size_t ini_len;
+    char *text = slurp(ini, &ini_len);
+    snprintf(line, sizeof(line), "banner_crc32=%08lX\n", (unsigned long)bnr);
+    CHECK(text && strstr(text, "dsiware=1\n") && strstr(text, "private_size=16384\n") && strstr(text, line));
+    free(text);
+
+    // Listed as written.
+    Backup list[BACKUP_LIST_MAX];
+    CHECK(backup_list(&lib, g, list, BACKUP_LIST_MAX) == 1);
+    CHECK(list[0].dsiware && list[0].has_meta && strcmp(list[0].file, b.file) == 0);
+    CHECK(list[0].part_size[DSI_PRIVATE] == DSI_PRV && list[0].part_crc[DSI_BANNER] == bnr);
+    CHECK(backup_validate(&list[0]) == DSAVE_OK);
+    CHECK(backup_set_compressed(&list[0], true, NULL) == DSAVE_ERR_DSIWARE);
+
+    // Play on: every file changes. Restore puts every one back, in place
+    // and at the header's size, and keeps the changed set as an Auto backup.
+    make_file("dsiware/Game.pub", DSI_PUB, 50);
+    make_file("dsiware/Game.prv", DSI_PRV, 51);
+    make_file("dsiware/Game.bnr", DSI_BANNER_SAVE_SIZE, 52);
+    uint32_t pub2 = crc_of_rel("dsiware/Game.pub"), prv2 = crc_of_rel("dsiware/Game.prv");
+    library_refresh_game(&lib, g);
+    Backup safety;
+    CHECK(backup_restore(&lib, g, &list[0], &safety) == DSAVE_OK);
+    CHECK(crc_of_rel("dsiware/Game.pub") == pub && crc_of_rel("dsiware/Game.prv") == prv &&
+          crc_of_rel("dsiware/Game.bnr") == bnr);
+    CHECK(safety.is_auto && safety.dsiware && part_is(&safety, DSI_PUBLIC, pub2, DSI_PUB) &&
+          part_is(&safety, DSI_PRIVATE, prv2, DSI_PRV));
+
+    // A missing file is created at the header's size; a file that grew
+    // is cut back to it.
+    char prv_path[DSAVE_PATH_MAX], pub_path[DSAVE_PATH_MAX];
+    p(prv_path, "dsiware/Game.prv");
+    p(pub_path, "dsiware/Game.pub");
+    remove(prv_path);
+    make_file("dsiware/Game.pub", DSI_PUB + 4 * KB, 53);
+    library_refresh_game(&lib, g);
+    CHECK(backup_restore(&lib, g, &list[0], &safety) == DSAVE_OK);
+    CHECK(file_size(prv_path) == DSI_PRV && crc_of(prv_path) == prv);
+    CHECK(file_size(pub_path) == DSI_PUB && crc_of(pub_path) == pub);
+    CHECK(!safety.has_meta || safety.part_size[DSI_PRIVATE] < 0); // There was no private file to keep
+
+    // Undo through the activity log puts the set from before back.
+    CHECK(activity_log(&lib, ACT_RESTORE, g, list[0].name, list[0].crc32, safety.name, g->save_path));
+    Activity acts[4];
+    int gi = -1;
+    Backup undo;
+    CHECK(activity_list(&lib, acts, 4) == 1 && activity_undo(&lib, &acts[0], &gi, &undo) == DSAVE_OK);
+    CHECK(gi >= 0 && file_size(pub_path) == DSI_PUB + 4 * KB && crc_of(pub_path) == safety.part_crc[DSI_PUBLIC]);
+    CHECK(file_size(prv_path) == DSI_PRV); // Not in the safety copy: left as the restore made it
+    CHECK(backup_restore(&lib, g, &list[0], NULL) == DSAVE_OK);
+
+    // Damage is caught before anything is written: a changed part, a
+    // missing part, or a part of the wrong size.
+    CHECK(backup_create(&lib, g, "second", false, &b) == DSAVE_OK);
+    char part[DSAVE_PATH_MAX];
+    path_join(part, sizeof(part), b.dir, "private.sav");
+    FILE *f = fopen(part, "r+b");
+    fputc(0x5A ^ fgetc(f), f);
+    fclose(f);
+    make_file("dsiware/Game.pub", DSI_PUB, 60);
+    uint32_t live = crc_of(pub_path);
+    library_refresh_game(&lib, g);
+    int n = backup_list(&lib, g, list, BACKUP_LIST_MAX);
+    Backup *second = NULL;
+    for (int i = 0; i < n; i++)
+        second = strcmp(list[i].name, "second") == 0 ? &list[i] : second;
+    CHECK(second && backup_validate(second) == DSAVE_ERR_CORRUPT);
+    CHECK(second && backup_restore(&lib, g, second, &safety) == DSAVE_ERR_CORRUPT && !safety.name[0]);
+    CHECK(crc_of(pub_path) == live);
+    remove(part);
+    n = backup_list(&lib, g, list, BACKUP_LIST_MAX);
+    second = NULL;
+    for (int i = 0; i < n; i++)
+        second = strcmp(list[i].name, "second") == 0 ? &list[i] : second;
+    CHECK(second && backup_validate(second) == DSAVE_ERR_CORRUPT); // backup.ini still lists it
+    CheckReport rep;
+    check_all(&lib, &rep, NULL, NULL);
+    CHECK(rep.backups >= 3 && rep.issue_count == 1 && rep.issues[0].kind == CHECK_DAMAGED &&
+          strcmp(rep.issues[0].name, "second") == 0);
+
+    // A file smaller than the header's size is refused: the title would
+    // find a cut-off FAT image.
+    Backup wrong;
+    make_file("other/odd.prv", 8 * KB, 9);
+    char odd[DSAVE_PATH_MAX];
+    p(odd, "other/odd.pub");
+    make_file("other/odd.pub", DSI_PUB, 8);
+    CHECK(backup_import(&lib, g, odd, &wrong) == DSAVE_ERR_BAD_SIZE);
+    make_file("_DSavE/saves/KGME DSi Game/short/public.sav", DSI_PUB - 512, 7);
+    n = backup_list(&lib, g, list, BACKUP_LIST_MAX);
+    Backup *shorter = NULL;
+    for (int i = 0; i < n; i++)
+        shorter = strcmp(list[i].name, "short") == 0 ? &list[i] : shorter;
+    CHECK(shorter && shorter->dsiware && !shorter->has_meta &&
+          backup_restore(&lib, g, shorter, &safety) == DSAVE_ERR_BAD_SIZE);
+}
+
+// A part that can't be written: every file goes back as it was.
+static void test_dsiware_rollback(void)
+{
+    Game *g = dsi_card(20);
+    if (!g)
+        return;
+    Backup b, safety;
+    CHECK(backup_create(&lib, g, "good", false, &b) == DSAVE_OK);
+    make_file("dsiware/Game.pub", DSI_PUB, 70);
+    make_file("dsiware/Game.prv", DSI_PRV, 71);
+    uint32_t pub = crc_of_rel("dsiware/Game.pub"), prv = crc_of_rel("dsiware/Game.prv");
+    // The banner's file becomes a link to nowhere, so writing it fails
+    // after the public and private saves were written.
+    char bnr[DSAVE_PATH_MAX], target[DSAVE_PATH_MAX];
+    p(bnr, "dsiware/Game.bnr");
+    p(target, "no/such/folder/x");
+    remove(bnr);
+    CHECK(symlink(target, bnr) == 0);
+    library_refresh_game(&lib, g);
+    CHECK(backup_restore(&lib, g, &b, &safety) == DSAVE_ERR_ROLLED_BACK);
+    CHECK(crc_of_rel("dsiware/Game.pub") == pub && crc_of_rel("dsiware/Game.prv") == prv);
+    CHECK(safety.dsiware && safety.part_size[DSI_BANNER] < 0);
+}
+
+// TWiLight running DSiWare in DS mode (nds-bootstrap, B4DS): the public save
+// is the game's .sav, and the banner save sits beside it.
+static void test_dsiware_sav_layout(void)
+{
+    new_card();
+    make_dir("_pico");
+    make_text("_nds/TWiLightMenu/settings.ini", "[SRLOADER]\nSAVE_LOCATION = 0\n");
+    make_text("_DSavE/settings.ini", "[dsave]\nkernel = twilight\n");
+    make_dsi_rom("Game.nds", "KGME", "DSi Game", (uint32_t)DSI_PUB, (uint32_t)DSI_PRV, true);
+    make_file("saves/Game.sav", DSI_PUB, 30);
+    make_file("saves/Game.bnr", DSI_BANNER_SAVE_SIZE, 31);
+    lib.dsi_mode = true; // The .sav already there wins
+    library_scan(&lib, root);
+    Game *g = find_game("KGME");
+    if (!g)
+        return;
+    uint32_t pub = crc_of_rel("saves/Game.sav"), bnr = crc_of_rel("saves/Game.bnr");
+    CHECK(g->has_save && path_is(g->save_path, "saves/Game.sav") && !g->primary_is_fallback);
+
+    Backup b;
+    CHECK(backup_create(&lib, g, "ds mode", false, &b) == DSAVE_OK);
+    CHECK(b.dsiware && part_is(&b, DSI_PUBLIC, pub, DSI_PUB) && b.part_size[DSI_PRIVATE] < 0 &&
+          part_is(&b, DSI_BANNER, bnr, DSI_BANNER_SAVE_SIZE));
+
+    // Onto Pico's layout: .pub and .bnr are made; there is no private save
+    // in the backup, so no .prv.
+    int pico = library_loc_for_kernel(g, KERNEL_PICO);
+    Backup safety;
+    CHECK(backup_restore_to(&lib, g, &b, pico, &safety) == DSAVE_OK && !safety.name[0]);
+    CHECK(crc_of_rel("Game.pub") == pub && crc_of_rel("Game.bnr") == bnr);
+    char prv[DSAVE_PATH_MAX];
+    p(prv, "Game.prv");
+    CHECK(!file_exists(prv));
+
+    // Copies compare the sets, and a copy writes the set.
+    SyncInfo si;
+    sync_check(g, &si);
+    CHECK(si.state == SYNC_MATCH);
+    make_file("Game.pub", DSI_PUB, 33);
+    make_file("Game.prv", DSI_PRV, 34);
+    library_refresh_game(&lib, g);
+    sync_check(g, &si);
+    CHECK(si.state == SYNC_DIFFERENT && si.loc[pico].data_size == DSI_PUB + DSI_PRV + DSI_BANNER_SAVE_SIZE);
+    int twl = library_loc_for_kernel(g, KERNEL_TWILIGHT);
+    CHECK(sync_copy(&lib, g, pico, twl, &safety) == DSAVE_OK && safety.dsiware);
+    CHECK(crc_of_rel("saves/Game.sav") == crc_of_rel("Game.pub") && file_size(g->save_path) == DSI_PUB);
+    sync_check(g, &si);
+    CHECK(si.loc[twl].same_as_primary);
+
+    // A one-file backup (DSavE 0.5 made these from TWiLight's .sav) is the
+    // public save.
+    make_file("_DSavE/saves/KGME DSi Game/old/DSi Game.sav", DSI_PUB, 35);
+    uint32_t old = crc_of_rel("_DSavE/saves/KGME DSi Game/old/DSi Game.sav");
+    Backup list[BACKUP_LIST_MAX];
+    int n = backup_list(&lib, g, list, BACKUP_LIST_MAX);
+    Backup *one = NULL;
+    for (int i = 0; i < n; i++)
+        one = strcmp(list[i].name, "old") == 0 ? &list[i] : one;
+    CHECK(one && !one->dsiware);
+    CHECK(one && backup_restore(&lib, g, one, &safety) == DSAVE_OK);
+    CHECK(crc_of_rel("saves/Game.sav") == old && crc_of_rel("saves/Game.bnr") == bnr);
+}
+
+static void test_dsiware_export_import(void)
+{
+    Game *g = dsi_card(40);
+    if (!g)
+        return;
+    uint32_t pub = crc_of_rel("dsiware/Game.pub"), prv = crc_of_rel("dsiware/Game.prv"),
+             bnr = crc_of_rel("dsiware/Game.bnr");
+    Backup b;
+    CHECK(backup_create(&lib, g, "b", false, &b) == DSAVE_OK);
+
+    // Export: the files TWiLight and Pico look for beside the ROM.
+    char out[DSAVE_PATH_MAX];
+    CHECK(backup_export(&lib, g, &b, EXPORT_DSV, out, sizeof(out)) == DSAVE_ERR_DSIWARE);
+    CHECK(backup_export(&lib, g, &b, EXPORT_SAV, out, sizeof(out)) == DSAVE_OK);
+    CHECK(path_is(out, "_DSavE/export/Game.pub"));
+    CHECK(crc_of_rel("_DSavE/export/Game.pub") == pub && crc_of_rel("_DSavE/export/Game.prv") == prv &&
+          crc_of_rel("_DSavE/export/Game.bnr") == bnr);
+
+    // Export all: the newest as the files beside a ROM; every backup as its
+    // folder holds them.
+    ArchiveStats st;
+    CHECK(archive_export(&lib, ARCHIVE_NEWEST, out, sizeof(out), &st, NULL, NULL) == DSAVE_OK);
+    size_t len, sz;
+    void *data = slurp(out, &len);
+    mz_zip_archive zip;
+    memset(&zip, 0, sizeof(zip));
+    CHECK(data && mz_zip_reader_init_mem(&zip, data, len, 0));
+    CHECK(mz_zip_reader_get_num_files(&zip) == 3);
+    void *pub_data = mz_zip_reader_extract_file_to_heap(&zip, "Game.pub", &sz, 0);
+    CHECK(pub_data && sz == (size_t)DSI_PUB);
+    free(pub_data);
+    CHECK(mz_zip_reader_locate_file(&zip, "Game.prv", NULL, 0) >= 0 &&
+          mz_zip_reader_locate_file(&zip, "Game.bnr", NULL, 0) >= 0);
+    mz_zip_reader_end(&zip);
+    free(data);
+
+    CHECK(archive_export(&lib, ARCHIVE_ALL, out, sizeof(out), &st, NULL, NULL) == DSAVE_OK);
+    CHECK(st.backups == 1);
+    data = slurp(out, &len);
+    memset(&zip, 0, sizeof(zip));
+    CHECK(data && mz_zip_reader_init_mem(&zip, data, len, 0));
+    void *prv_data = mz_zip_reader_extract_file_to_heap(&zip, "saves/KGME DSi Game/b/private.sav", &sz, 0);
+    CHECK(prv_data && sz == (size_t)DSI_PRV && crc32_update(0, prv_data, sz) == prv);
+    free(prv_data);
+    CHECK(mz_zip_reader_locate_file(&zip, "saves/KGME DSi Game/b/public.sav", NULL, 0) >= 0 &&
+          mz_zip_reader_locate_file(&zip, "saves/KGME DSi Game/b/banner.sav", NULL, 0) >= 0 &&
+          mz_zip_reader_locate_file(&zip, "saves/KGME DSi Game/b/backup.ini", NULL, 0) >= 0);
+    CHECK(mz_zip_reader_get_num_files(&zip) == 4);
+    mz_zip_reader_end(&zip);
+    free(data);
+
+    // Import: the three files are one entry, matched to the ROM.
+    make_file("_DSavE/import/Game.pub", DSI_PUB, 41);
+    make_file("_DSavE/import/Game.prv", DSI_PRV, 42);
+    make_file("_DSavE/import/Game.bnr", DSI_BANNER_SAVE_SIZE, 43);
+    make_file("_DSavE/import/Lone.bnr", DSI_BANNER_SAVE_SIZE, 44);
+    ImportFile files[IMPORT_LIST_MAX];
+    int n = backup_import_list(&lib, files, IMPORT_LIST_MAX);
+    CHECK(n == 2 && strcmp(files[0].name, "Game.pub") == 0 && files[0].dsiware && files[0].valid &&
+          files[0].game == (int)(g - lib.games));
+    CHECK(n == 2 && strcmp(files[1].name, "Lone.bnr") == 0 && files[1].game < 0);
+    Backup imp;
+    CHECK(backup_import(&lib, g, files[0].path, &imp) == DSAVE_OK);
+    CHECK(strcmp(imp.name, "import_Game") == 0 && imp.dsiware &&
+          part_is(&imp, DSI_PUBLIC, crc_of_rel("_DSavE/import/Game.pub"), DSI_PUB) &&
+          part_is(&imp, DSI_PRIVATE, crc_of_rel("_DSavE/import/Game.prv"), DSI_PRV) &&
+          part_is(&imp, DSI_BANNER, crc_of_rel("_DSavE/import/Game.bnr"), DSI_BANNER_SAVE_SIZE));
+
+    // A plain .sav of the public save's size (TWiLight in DS mode, an
+    // emulator) is the public save.
+    char path[DSAVE_PATH_MAX];
+    make_file("_DSavE/import/Game DS.sav", DSI_PUB, 45);
+    p(path, "_DSavE/import/Game DS.sav");
+    CHECK(backup_import(&lib, g, path, &imp) == DSAVE_OK);
+    CHECK(imp.dsiware && part_is(&imp, DSI_PUBLIC, crc_of(path), DSI_PUB) && imp.part_size[DSI_PRIVATE] < 0);
+    make_file("_DSavE/import/Small.sav", 64 * KB, 46);
+    p(path, "_DSavE/import/Small.sav");
+    CHECK(backup_import(&lib, g, path, &imp) == DSAVE_ERR_BAD_SIZE);
+
+    // DSiWare files only go into DSiWare games.
+    make_rom("Retail.nds", "RETAIL", "ABCE", NULL);
+    library_scan(&lib, root);
+    Game *retail = find_game("ABCE");
+    p(path, "_DSavE/import/Game.pub");
+    CHECK(retail && backup_import(&lib, retail, path, &imp) == DSAVE_ERR_WRONG_GAME);
+}
+
 int main(void)
 {
     char tmpl[] = "/tmp/dsave-test-XXXXXX";
@@ -2413,6 +2910,12 @@ int main(void)
     test_backup_list_newest();
     test_nocash_huge_header();
     test_restore_disk_full();
+    test_dsiware_detection();
+    test_dsiware_paths();
+    test_dsiware_backup_restore();
+    test_dsiware_rollback();
+    test_dsiware_sav_layout();
+    test_dsiware_export_import();
 
     library_free(&lib);
     remove_tree(tmpl);

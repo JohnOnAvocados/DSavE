@@ -13,6 +13,11 @@
 
 // One place a game's save lives (or would live) for one or more kernels.
 // Kernels that agree on a path share one entry.
+//
+// A DSiWare title's save is up to three files (rom.h, DsiPart). path is then
+// its main file: the public save, or the first part the title has. The
+// others sit beside it (library_dsi_part_path). exists means any of them
+// exists, size is their total and mtime the newest.
 typedef struct {
     char path[DSAVE_PATH_MAX];
     KernelMask kernels;
@@ -58,6 +63,10 @@ typedef struct {
     bool truncated;            // More ROMs than LIBRARY_MAX_GAMES
     bool compress;             // Store new backups as .sav.gz
     int keep_auto;             // Auto backups kept per game, 0 = all
+    // DSavE runs in DSi mode. Where TWiLight has no DSiWare save yet, this
+    // picks the layout it will make (kernel.h, DsiLayout). Set by main.c
+    // before the first scan; library_scan leaves it alone.
+    bool dsi_mode;
 } Library;
 
 #define LIBRARY_KEEP_AUTO_DEFAULT 10
@@ -92,5 +101,26 @@ bool library_set_keep_auto(Library *lib, int keep);
 
 // Find the location entry used by a kernel, or -1.
 int library_loc_for_kernel(const Game *game, KernelId id);
+
+// The path kernel id uses for this game's save in a slot: kernel_save_path,
+// or for DSiWare the main file in the layout the kernel uses (for TWiLight,
+// the layout of the files already there, else the one lib->dsi_mode
+// implies). Returns false if the kernel has no save for this game there.
+bool library_kernel_path(const Library *lib, const Game *game, KernelId id, int slot, char *out,
+                         size_t size);
+
+// DSiWare: the path of one of the title's save files at the location whose
+// main file is main_path. Returns false if the title doesn't use that part,
+// or the layout has no file for it (the SAV layout keeps no private save
+// when there is a public one).
+bool library_dsi_part_path(const Game *game, const char *main_path, DsiPart part, char *out, size_t size);
+
+// The part a DSiWare title's main file holds, or DSI_PARTS if it has none.
+DsiPart library_dsi_main_part(const Game *game);
+
+// Whether a save exists at path (for DSiWare, any of its files beside the
+// main file path), with its size (their total) and newest mtime. size and
+// mtime may be NULL; they get -1 and 0 when it is missing.
+bool library_stat_save(const Game *game, const char *path, long *size, time_t *mtime);
 
 #endif

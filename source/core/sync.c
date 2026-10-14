@@ -54,6 +54,40 @@ static bool data_crc(const char *path, uint32_t *crc_out, long *len_out)
     return ok;
 }
 
+// CRC-32 and length of a DSiWare save's files at the location whose main
+// file is path, one after the other. They are fixed-size FAT images, so
+// nothing is padding.
+static bool dsi_crc(const Game *game, const char *path, uint32_t *crc_out, long *len_out)
+{
+    uint32_t crc = 0;
+    long len = 0;
+    bool any = false;
+    for (int part = 0; part < DSI_PARTS; part++)
+    {
+        char p[DSAVE_PATH_MAX];
+        if (!library_dsi_part_path(game, path, (DsiPart)part, p, sizeof(p)))
+            continue;
+        FILE *f = fopen(p, "rb");
+        if (!f)
+            continue;
+        uint8_t buf[IO_CHUNK];
+        size_t n;
+        while ((n = fread(buf, 1, sizeof(buf), f)) > 0)
+        {
+            crc = crc32_update(crc, buf, n);
+            len += (long)n;
+        }
+        bool bad = ferror(f);
+        fclose(f);
+        if (bad)
+            return false;
+        any = true;
+    }
+    *crc_out = crc;
+    *len_out = len;
+    return any;
+}
+
 void sync_check(const Game *game, SyncInfo *out)
 {
     memset(out, 0, sizeof(*out));
@@ -63,7 +97,8 @@ void sync_check(const Game *game, SyncInfo *out)
     {
         const SaveLoc *loc = &game->locs[i];
         LocStatus *st = &out->loc[i];
-        st->exists = loc->exists && data_crc(loc->path, &st->crc32, &st->data_size);
+        st->exists = loc->exists && (game->info.dsiware ? dsi_crc(game, loc->path, &st->crc32, &st->data_size)
+                                                        : data_crc(loc->path, &st->crc32, &st->data_size));
         if (!st->exists)
             continue;
         out->existing++;
@@ -104,12 +139,14 @@ DsaveResult sync_copy(const Library *lib, Game *game, int from, int to, Backup *
         return DSAVE_ERR_NO_SAVE;
 
     // Treat the source file as a backup with no backup.ini: restore checks
-    // its size, keeps the target's padding and makes the safety copy.
+    // its size, keeps the target's padding and makes the safety copy. A
+    // DSiWare source brings the files beside it (Backup.live).
     Backup src;
     memset(&src, 0, sizeof(src));
     snprintf(src.file, sizeof(src.file), "%s", game->locs[from].path);
     path_dirname(src.dir, sizeof(src.dir), src.file);
     src.size = game->locs[from].size;
+    src.live = game->info.dsiware;
     return backup_restore_to(lib, game, &src, to, auto_backup);
 }
 
@@ -150,11 +187,10 @@ int slots_list(const Library *lib, const Game *game, KernelId kernel, SaveSlot *
     {
         SaveSlot *s = &out[n];
         memset(s, 0, sizeof(*s));
-        if (!kernel_save_path(ks, kernel, game->rom_path, slot, s->path, sizeof(s->path)))
+        if (!library_kernel_path(lib, game, kernel, slot, s->path, sizeof(s->path)))
             continue;
         s->number = slot;
-        s->exists = file_exists(s->path);
-        s->size = s->exists ? file_size(s->path) : -1;
+        s->exists = library_stat_save(game, s->path, &s->size, NULL);
         s->current = slot == current;
         n++;
     }

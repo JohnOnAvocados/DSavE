@@ -7,8 +7,15 @@
 // Cartridge header offsets (GBATEK "DS Cartridge Header").
 #define HDR_TITLE        0x000
 #define HDR_GAME_CODE    0x00C
+#define HDR_UNIT_CODE    0x012
 #define HDR_BANNER_OFFS  0x068
 #define HDR_SIZE         0x200
+
+// DSi header fields (see rom_parse_dsi)
+#define HDR_DSI_FLAGS    0x1BF // Bit 2: has a banner save
+#define HDR_TITLE_ID_HI  0x234
+#define HDR_PUBLIC_SIZE  0x238
+#define HDR_PRIVATE_SIZE 0x23C
 
 // Banner layout (GBATEK "DS Cartridge Icon/Title"): six or more 0x100-byte
 // UTF-16LE titles starting at 0x240, Japanese first, English second.
@@ -146,10 +153,45 @@ void rom_decode_icon(const uint8_t *bitmap, const uint8_t *palette, RomIcon *ico
     icon->valid = true;
 }
 
+static uint32_t le32(const uint8_t *b)
+{
+    return (uint32_t)b[0] | ((uint32_t)b[1] << 8) | ((uint32_t)b[2] << 16) | ((uint32_t)b[3] << 24);
+}
+
 static uint32_t banner_offset(const uint8_t *hdr)
 {
-    return (uint32_t)hdr[HDR_BANNER_OFFS] | ((uint32_t)hdr[HDR_BANNER_OFFS + 1] << 8) |
-           ((uint32_t)hdr[HDR_BANNER_OFFS + 2] << 16) | ((uint32_t)hdr[HDR_BANNER_OFFS + 3] << 24);
+    return le32(hdr + HDR_BANNER_OFFS);
+}
+
+void rom_parse_dsi(RomInfo *info, const uint8_t *hdr)
+{
+    uint32_t tid_hi = le32(hdr + HDR_TITLE_ID_HI);
+    info->dsiware = (hdr[HDR_UNIT_CODE] & 0x02) && (tid_hi >> 16) == 0x0003 && (tid_hi & 0x04);
+    if (!info->dsiware)
+        return;
+    info->dsi_public_size = le32(hdr + HDR_PUBLIC_SIZE);
+    info->dsi_private_size = le32(hdr + HDR_PRIVATE_SIZE);
+    info->dsi_banner_save = (hdr[HDR_DSI_FLAGS] & 0x04) != 0;
+}
+
+long rom_dsi_part_size(const RomInfo *info, DsiPart part)
+{
+    if (!info->dsiware)
+        return 0;
+    // A size past 16 MB is not a real save; treat the header as damaged.
+    const uint32_t max = 16u * 1024 * 1024;
+    switch (part)
+    {
+        case DSI_PUBLIC:  return info->dsi_public_size <= max ? (long)info->dsi_public_size : 0;
+        case DSI_PRIVATE: return info->dsi_private_size <= max ? (long)info->dsi_private_size : 0;
+        case DSI_BANNER:  return info->dsi_banner_save ? DSI_BANNER_SAVE_SIZE : 0;
+        default:          return 0;
+    }
+}
+
+bool rom_dsi_has_part(const RomInfo *info, DsiPart part)
+{
+    return rom_dsi_part_size(info, part) > 0;
 }
 
 bool rom_read_icon(const char *path, RomIcon *icon)
@@ -191,8 +233,9 @@ bool rom_read_info(const char *path, RomInfo *info)
     if (!f)
         return false;
 
-    uint8_t hdr[HDR_SIZE];
-    if (fread(hdr, 1, sizeof(hdr), f) != sizeof(hdr))
+    uint8_t hdr[ROM_DSI_HEADER_SIZE];
+    size_t got = fread(hdr, 1, sizeof(hdr), f);
+    if (got < HDR_SIZE)
     {
         fclose(f);
         return false;
@@ -205,6 +248,8 @@ bool rom_read_info(const char *path, RomInfo *info)
                 fread(titles, 1, sizeof(titles), f) == sizeof(titles);
     fclose(f);
     rom_parse(info, hdr, have ? titles : NULL);
+    if (got == sizeof(hdr))
+        rom_parse_dsi(info, hdr);
     return true;
 }
 

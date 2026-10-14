@@ -44,6 +44,7 @@ const char *dsave_result_str(DsaveResult r)
         case DSAVE_ERR_KEPT:          return "This backup is marked Keep";
         case DSAVE_ERR_ROLLBACK_FAILED: return "Restore failed; restore the Auto backup";
         case DSAVE_ERR_GONE:          return "That backup is no longer on the card";
+        case DSAVE_ERR_DSIWARE:       return "Not available for DSiWare saves";
     }
     return "Unknown error";
 }
@@ -90,8 +91,28 @@ static bool unique_path(char *out, size_t size, const char *parent, const char *
 // ---------------------------------------------------------------------------
 // backup.ini
 
+static const char *const part_names[DSI_PARTS] = { "public.sav", "private.sav", "banner.sav" };
+// backup.ini keys of each DSiWare part: "public_size", "public_crc32"...
+static const char *const part_keys[DSI_PARTS] = { "public", "private", "banner" };
+
+const char *backup_dsi_part_name(DsiPart part)
+{
+    return part < DSI_PARTS ? part_names[part] : "";
+}
+
+long backup_data_size(const Backup *b)
+{
+    if (!b->dsiware)
+        return b->size;
+    long total = 0;
+    for (int p = 0; p < DSI_PARTS; p++)
+        total += b->part_size[p] > 0 ? b->part_size[p] : 0;
+    return total;
+}
+
+// dsi, when not NULL, is a DSiWare backup whose parts are recorded too.
 static bool write_meta(const char *dir, const Game *game, const char *src,
-                       const char *created, long size, uint32_t crc)
+                       const char *created, long size, uint32_t crc, const Backup *dsi)
 {
     char path[DSAVE_PATH_MAX];
     if (!path_join(path, sizeof(path), dir, META_FILE))
@@ -105,11 +126,24 @@ static bool write_meta(const char *dir, const Game *game, const char *src,
     fprintf(f, "crc32=%08" PRIX32 "\n", crc);
     fprintf(f, "created=%s\n", created);
     fprintf(f, "source=%s\n", src);
+    if (dsi)
+    {
+        fprintf(f, "dsiware=1\n");
+        for (int p = 0; p < DSI_PARTS; p++)
+        {
+            if (dsi->part_size[p] < 0)
+                continue;
+            fprintf(f, "%s_size=%ld\n", part_keys[p], dsi->part_size[p]);
+            fprintf(f, "%s_crc32=%08" PRIX32 "\n", part_keys[p], dsi->part_crc[p]);
+        }
+    }
     return fclose(f) == 0;
 }
 
-static bool read_meta(Backup *b)
+// *parts counts the DSiWare part sizes and CRCs found.
+static bool read_meta(Backup *b, int *parts)
 {
+    *parts = 0;
     char path[DSAVE_PATH_MAX];
     if (!path_join(path, sizeof(path), b->dir, META_FILE))
         return false;
@@ -139,6 +173,16 @@ static bool read_meta(Backup *b)
             snprintf(b->note, sizeof(b->note), "%s", val);
         else if (strcmp(key, "keep") == 0)
             b->keep = strcmp(val, "1") == 0;
+        for (int p = 0; p < DSI_PARTS; p++)
+        {
+            size_t kl = strlen(part_keys[p]);
+            if (strncmp(key, part_keys[p], kl) != 0)
+                continue;
+            if (strcmp(key + kl, "_size") == 0)
+                b->part_size[p] = strtol(val, NULL, 10), ++*parts;
+            else if (strcmp(key + kl, "_crc32") == 0)
+                b->part_crc[p] = (uint32_t)strtoul(val, NULL, 16), ++*parts;
+        }
     }
     fclose(f);
     return got_size && got_crc;
@@ -202,10 +246,24 @@ DsaveResult backup_create_from(const Library *lib, const Game *game, const char 
     return backup_create_labeled(lib, game, src, src, name, allow_blank, out);
 }
 
+static DsaveResult create_dsi(const Library *lib, const Game *game, char src[DSI_PARTS][DSAVE_PATH_MAX],
+                              const char *source_label, const char *name, bool allow_blank, Backup *out);
+
 DsaveResult backup_create_labeled(const Library *lib, const Game *game, const char *src,
                                   const char *source_label, const char *name, bool allow_blank,
                                   Backup *out)
 {
+    if (game->info.dsiware)
+    {
+        // src is a save location's main file: take every part beside it.
+        static char parts[DSI_PARTS][DSAVE_PATH_MAX];
+        for (int p = 0; p < DSI_PARTS; p++)
+        {
+            if (!library_dsi_part_path(game, src, (DsiPart)p, parts[p], sizeof(parts[p])))
+                parts[p][0] = '\0';
+        }
+        return create_dsi(lib, game, parts, source_label, name, allow_blank, out);
+    }
     if (!file_exists(src))
         return DSAVE_ERR_NO_SAVE;
     if (!allow_blank && file_is_blank(src))
@@ -254,7 +312,7 @@ DsaveResult backup_create_labeled(const Library *lib, const Game *game, const ch
     else if (!savefile_crc32(tmp_file, &dst_crc, &dst_size) ||
              dst_crc != src_crc || dst_size != src_size)
         r = DSAVE_ERR_VERIFY;
-    else if (!write_meta(tmp_dir, game, source_label, created, src_size, src_crc))
+    else if (!write_meta(tmp_dir, game, source_label, created, src_size, src_crc, NULL))
         r = DSAVE_ERR_IO;
 
     char final_dir[DSAVE_PATH_MAX];
@@ -287,23 +345,155 @@ DsaveResult backup_create_labeled(const Library *lib, const Game *game, const ch
 }
 
 // ---------------------------------------------------------------------------
+// DSiWare backups
+
+// A new backup of a DSiWare title from the files in src (one per part, ""
+// for a part not there), as backup_create_labeled does for one file.
+static DsaveResult create_dsi(const Library *lib, const Game *game, char src[DSI_PARTS][DSAVE_PATH_MAX],
+                              const char *source_label, const char *name, bool allow_blank, Backup *out)
+{
+    bool any = false, blank = true;
+    for (int p = 0; p < DSI_PARTS; p++)
+    {
+        if (!src[p][0] || !file_exists(src[p]))
+        {
+            src[p][0] = '\0';
+            continue;
+        }
+        any = true;
+        if (!file_is_blank(src[p]))
+            blank = false;
+    }
+    if (!any)
+        return DSAVE_ERR_NO_SAVE;
+    if (!allow_blank && blank)
+        return DSAVE_WARN_BLANK;
+
+    char game_dir[DSAVE_PATH_MAX];
+    if (!backup_game_dir(lib, game, game_dir, sizeof(game_dir)))
+        return DSAVE_ERR_PATH;
+    if (!mkdir_p(game_dir))
+        return DSAVE_ERR_IO;
+
+    char created[24], clean[BACKUP_NAME_MAX + 1];
+    timestamp_now(created, sizeof(created));
+    sanitize_name(clean, sizeof(clean), (name && *name) ? name : created, BACKUP_NAME_MAX);
+    char tmp_leaf[BACKUP_NAME_MAX + 8], tmp_dir[DSAVE_PATH_MAX];
+    snprintf(tmp_leaf, sizeof(tmp_leaf), TMP_PREFIX "%s", clean);
+    if (!path_join(tmp_dir, sizeof(tmp_dir), game_dir, tmp_leaf))
+        return DSAVE_ERR_PATH;
+    if (dir_exists(tmp_dir))
+        remove_tree(tmp_dir);
+    if (!mkdir_p(tmp_dir))
+        return DSAVE_ERR_IO;
+
+    // Each part is copied and checked against its source. The first one
+    // there is the main part, which backup.ini's size and crc32 describe.
+    Backup made;
+    memset(&made, 0, sizeof(made));
+    made.dsiware = true;
+    int first = -1;
+    DsaveResult r = DSAVE_OK;
+    for (int p = 0; p < DSI_PARTS; p++)
+    {
+        made.part_size[p] = -1;
+        if (!src[p][0] || r != DSAVE_OK)
+            continue;
+        char dst[DSAVE_PATH_MAX];
+        uint32_t src_crc, dst_crc;
+        long src_size, dst_size;
+        if (!path_join(dst, sizeof(dst), tmp_dir, part_names[p]))
+            r = DSAVE_ERR_PATH;
+        else if (!file_crc32(src[p], &src_crc, &src_size) || !copy_file(src[p], dst))
+            r = DSAVE_ERR_IO;
+        else if (!file_crc32(dst, &dst_crc, &dst_size) || dst_crc != src_crc || dst_size != src_size)
+            r = DSAVE_ERR_VERIFY;
+        else
+        {
+            made.part_size[p] = src_size;
+            made.part_crc[p] = src_crc;
+            if (first < 0)
+                first = p;
+        }
+    }
+    if (r == DSAVE_OK &&
+        !write_meta(tmp_dir, game, source_label, created, made.part_size[first], made.part_crc[first], &made))
+        r = DSAVE_ERR_IO;
+
+    char final_dir[DSAVE_PATH_MAX];
+    if (r == DSAVE_OK && !unique_path(final_dir, sizeof(final_dir), game_dir, clean, ""))
+        r = DSAVE_ERR_PATH;
+    if (r == DSAVE_OK && rename(tmp_dir, final_dir) != 0)
+        r = DSAVE_ERR_IO;
+    if (r != DSAVE_OK)
+    {
+        remove_tree(tmp_dir);
+        return r;
+    }
+
+    if (out)
+    {
+        *out = made;
+        path_basename(out->name, sizeof(out->name), final_dir);
+        snprintf(out->dir, sizeof(out->dir), "%s", final_dir);
+        path_join(out->file, sizeof(out->file), final_dir, part_names[first]);
+        snprintf(out->game_code, sizeof(out->game_code), "%s", game->info.game_code);
+        snprintf(out->created, sizeof(out->created), "%s", created);
+        out->size = made.part_size[first];
+        out->crc32 = made.part_crc[first];
+        out->has_meta = true;
+        out->is_auto = strncmp(out->name, AUTO_PREFIX, strlen(AUTO_PREFIX)) == 0;
+    }
+    return DSAVE_OK;
+}
+
+bool backup_dsi_part_file(const Game *game, const Backup *b, DsiPart part, char *out, size_t size)
+{
+    if (part >= DSI_PARTS)
+        return false;
+    if (b->live)
+        return library_dsi_part_path(game, b->file, part, out, size) && file_exists(out);
+    if (b->dsiware)
+        return b->part_size[part] >= 0 && path_join(out, size, b->dir, part_names[part]);
+    if (part != library_dsi_main_part(game))
+        return false;
+    int n = snprintf(out, size, "%s", b->file);
+    return n >= 0 && (size_t)n < size;
+}
+
+// ---------------------------------------------------------------------------
 // List
 
-// The save inside a backup folder: the first *.sav or *.sav.gz found.
+// How much a file in a backup folder looks like its main save: a DSiWare
+// backup's public.sav, then private.sav, then any other save, then
+// banner.sav. -1 for a file that is no save.
+static int sav_rank(const char *name)
+{
+    if (name[0] == '.' || !(has_ext(name, ".sav") || has_ext(name, ".sav.gz")))
+        return -1;
+    if (strcasecmp(name, part_names[DSI_PUBLIC]) == 0)
+        return 0;
+    if (strcasecmp(name, part_names[DSI_PRIVATE]) == 0)
+        return 1;
+    return strcasecmp(name, part_names[DSI_BANNER]) == 0 ? 3 : 2;
+}
+
+// The save inside a backup folder: its main *.sav or *.sav.gz (sav_rank).
 static bool find_sav(const char *dir, char *out, size_t size)
 {
     DIR *d = opendir(dir);
     if (!d)
         return false;
-    bool found = false;
+    int best = -1;
     struct dirent *e;
-    while (!found && (e = readdir(d)) != NULL)
+    while (best != 0 && (e = readdir(d)) != NULL)
     {
-        if (e->d_name[0] != '.' && (has_ext(e->d_name, ".sav") || has_ext(e->d_name, ".sav.gz")))
-            found = path_join(out, size, dir, e->d_name);
+        int rank = sav_rank(e->d_name);
+        if (rank >= 0 && (best < 0 || rank < best) && path_join(out, size, dir, e->d_name))
+            best = rank;
     }
     closedir(d);
-    return found;
+    return best >= 0;
 }
 
 static int compare_backups(const void *a, const void *b)
@@ -328,13 +518,32 @@ static bool read_backup(const char *game_dir, const char *name, Backup *b)
     if (!find_sav(b->dir, b->file, sizeof(b->file)))
         return false;
     snprintf(b->name, sizeof(b->name), "%s", name);
-    b->has_meta = read_meta(b);
+    for (int p = 0; p < DSI_PARTS; p++)
+        b->part_size[p] = -1;
+    int parts;
+    b->has_meta = read_meta(b, &parts);
     if (!b->has_meta)
     {
         // Hand-copied backup: fall back to what the file itself says.
         b->size = savefile_size(b->file);
         snprintf(b->created, sizeof(b->created), "%s", b->name);
     }
+    // A DSiWare backup is known by its part files, or backup.ini's record of
+    // them. A recorded part whose file is gone stays listed, so that
+    // backup_validate reports the backup as damaged.
+    b->dsiware = parts > 0;
+    for (int p = 0; p < DSI_PARTS; p++)
+    {
+        char path[DSAVE_PATH_MAX];
+        if (!path_join(path, sizeof(path), b->dir, part_names[p]) || !file_exists(path))
+            continue;
+        b->dsiware = true;
+        if (!parts)
+            b->part_size[p] = file_size(path);
+    }
+    // Part files without their sizes and CRCs in backup.ini can't be checked.
+    if (b->dsiware && !parts)
+        b->has_meta = false;
     b->is_auto = strncmp(b->name, AUTO_PREFIX, strlen(AUTO_PREFIX)) == 0;
     b->compressed = savefile_is_gz(b->file);
     return true;
@@ -387,6 +596,24 @@ int backup_list(const Library *lib, const Game *game, Backup *out, int max)
 
 DsaveResult backup_validate(const Backup *b)
 {
+    if (b->dsiware && !b->live)
+    {
+        for (int p = 0; p < DSI_PARTS; p++)
+        {
+            char path[DSAVE_PATH_MAX];
+            uint32_t crc;
+            long size;
+            if (b->part_size[p] < 0)
+                continue;
+            if (!path_join(path, sizeof(path), b->dir, part_names[p]))
+                return DSAVE_ERR_PATH;
+            if (!file_crc32(path, &crc, &size))
+                return file_exists(path) ? DSAVE_ERR_IO : DSAVE_ERR_CORRUPT;
+            if (size <= 0 || (b->has_meta && (size != b->part_size[p] || crc != b->part_crc[p])))
+                return DSAVE_ERR_CORRUPT;
+        }
+        return DSAVE_OK;
+    }
     uint32_t crc;
     long size;
     if (!savefile_crc32(b->file, &crc, &size))
@@ -480,11 +707,126 @@ DsaveResult backup_restore_to(const Library *lib, Game *game, const Backup *b, i
     return backup_restore_path(lib, game, b, path, auto_backup);
 }
 
+// Check a backup's data against backup.ini, without asking for a DS save
+// chip size: a one-file backup of a DSiWare title is the size of its
+// public or private save.
+static DsaveResult validate_data(const Backup *b)
+{
+    if (b->dsiware || b->live)
+        return b->live ? DSAVE_OK : backup_validate(b);
+    uint32_t crc;
+    long size;
+    if (!savefile_crc32(b->file, &crc, &size))
+        return b->compressed || savefile_is_gz(b->file) ? DSAVE_ERR_CORRUPT : DSAVE_ERR_IO;
+    if (b->has_meta && (size != b->size || crc != b->crc32))
+        return DSAVE_ERR_CORRUPT;
+    return DSAVE_OK;
+}
+
+// Write len bytes of src over dst in place and cut dst to exactly len.
+// crc_out receives the CRC of what was written.
+static bool write_exact(const char *src, const char *dst, long len, uint32_t *crc_out)
+{
+    return write_save_stream(src, len, dst, len, crc_out) &&
+           (file_size(dst) == len || truncate(dst, len) == 0);
+}
+
+static DsaveResult restore_dsi(const Library *lib, Game *game, const Backup *b, const char *path,
+                               Backup *auto_backup)
+{
+    DsaveResult r = validate_data(b);
+    if (r != DSAVE_OK)
+        return r;
+    if (b->game_code[0] && strcmp(b->game_code, game->info.game_code) != 0)
+        return DSAVE_ERR_WRONG_GAME;
+
+    // The parts the title uses, that the backup holds, and that this
+    // location keeps a file for. Each is a FAT image the header gives the
+    // size of; a shorter one would be cut off. (A longer one is what a
+    // loader that grows files and never shrinks them left there; it goes
+    // back as it was.)
+    static struct {
+        char src[DSAVE_PATH_MAX], dst[DSAVE_PATH_MAX];
+        int part;
+        long len;
+        bool existed;
+    } job[DSI_PARTS];
+    int jobs = 0;
+    for (int p = 0; p < DSI_PARTS; p++)
+    {
+        if (!library_dsi_part_path(game, path, (DsiPart)p, job[jobs].dst, sizeof(job[jobs].dst)) ||
+            !backup_dsi_part_file(game, b, (DsiPart)p, job[jobs].src, sizeof(job[jobs].src)))
+            continue;
+        job[jobs].len = savefile_size(job[jobs].src);
+        if (job[jobs].len < rom_dsi_part_size(&game->info, (DsiPart)p))
+            return job[jobs].len < 0 ? DSAVE_ERR_IO : DSAVE_ERR_BAD_SIZE;
+        job[jobs].existed = file_exists(job[jobs].dst);
+        job[jobs].part = p;
+        jobs++;
+    }
+    if (!jobs)
+        return DSAVE_ERR_BAD_SIZE;
+
+    // Safety copy of every file there now (an Auto backup of the set).
+    Backup safety;
+    memset(&safety, 0, sizeof(safety));
+    bool have_safety = library_stat_save(game, path, NULL, NULL);
+    if (have_safety)
+    {
+        char auto_name[BACKUP_NAME_MAX + 1];
+        backup_auto_name(auto_name, sizeof(auto_name));
+        r = backup_create_from(lib, game, path, auto_name, true, &safety);
+        if (r != DSAVE_OK)
+            return r;
+        if (auto_backup)
+            *auto_backup = safety;
+        backup_prune_auto(lib, game, lib->keep_auto, safety.name);
+    }
+
+    bool ok = true;
+    for (int i = 0; ok && i < jobs; i++)
+    {
+        char dir[DSAVE_PATH_MAX];
+        uint32_t crc;
+        path_dirname(dir, sizeof(dir), job[i].dst);
+        ok = mkdir_p(dir) && write_exact(job[i].src, job[i].dst, job[i].len, &crc) &&
+             matches(job[i].dst, crc, job[i].len);
+    }
+    if (ok)
+    {
+        library_refresh_game(lib, game);
+        return DSAVE_OK;
+    }
+
+    // Put every file back as it was: from the safety copy, or gone if the
+    // restore created it.
+    bool back = true;
+    for (int i = 0; i < jobs; i++)
+    {
+        if (!job[i].existed)
+        {
+            remove(job[i].dst);
+            back = back && !file_exists(job[i].dst);
+            continue;
+        }
+        char old[DSAVE_PATH_MAX];
+        uint32_t crc;
+        long len = have_safety ? safety.part_size[job[i].part] : -1;
+        bool put = len >= 0 && path_join(old, sizeof(old), safety.dir, part_names[job[i].part]) &&
+                   write_exact(old, job[i].dst, len, &crc) && matches(job[i].dst, crc, len);
+        back = back && put;
+    }
+    library_refresh_game(lib, game);
+    return back ? (have_safety ? DSAVE_ERR_ROLLED_BACK : DSAVE_ERR_IO) : DSAVE_ERR_ROLLBACK_FAILED;
+}
+
 DsaveResult backup_restore_path(const Library *lib, Game *game, const Backup *b,
                                 const char *path, Backup *auto_backup)
 {
     if (auto_backup)
         memset(auto_backup, 0, sizeof(*auto_backup));
+    if (game->info.dsiware)
+        return restore_dsi(lib, game, b, path, auto_backup);
 
     DsaveResult r = backup_validate(b);
     if (r != DSAVE_OK)
@@ -568,6 +910,8 @@ DsaveResult backup_set_compressed(const Backup *b, bool compress, Backup *out)
 {
     if (out)
         *out = *b;
+    if (b->dsiware)
+        return compress ? DSAVE_ERR_DSIWARE : DSAVE_OK;
     bool is_gz = savefile_is_gz(b->file);
     if (is_gz == compress)
         return DSAVE_OK;
@@ -699,9 +1043,56 @@ void backup_export_stem(const Game *game, char *out, size_t size)
     snprintf(out, size, "%s_%s", title, game->info.game_code);
 }
 
+// File extensions of the DSiWare parts beside a ROM (kernel.h).
+static const char *const part_exts[DSI_PARTS] = { ".pub", ".prv", ".bnr" };
+
+static DsaveResult export_dsi(const Library *lib, const Game *game, const Backup *b, char *out_path,
+                              size_t out_size)
+{
+    DsaveResult r = validate_data(b);
+    if (r != DSAVE_OK)
+        return r;
+    char dir[DSAVE_PATH_MAX], stem[DSAVE_PATH_MAX], tmp[DSAVE_PATH_MAX];
+    if (!path_join(dir, sizeof(dir), lib->root, EXPORT_DIR) || !path_join(tmp, sizeof(tmp), dir, ".export.tmp"))
+        return DSAVE_ERR_PATH;
+    if (!mkdir_p(dir))
+        return DSAVE_ERR_IO;
+    backup_export_stem(game, stem, sizeof(stem));
+
+    int done = 0;
+    for (int p = 0; p < DSI_PARTS; p++)
+    {
+        char src[DSAVE_PATH_MAX], leaf[DSAVE_PATH_MAX], target[DSAVE_PATH_MAX];
+        if (!backup_dsi_part_file(game, b, (DsiPart)p, src, sizeof(src)))
+            continue;
+        snprintf(leaf, sizeof(leaf), "%s%s", stem, part_exts[p]);
+        if (!path_join(target, sizeof(target), dir, leaf))
+            return DSAVE_ERR_PATH;
+        long size = savefile_size(src);
+        uint32_t crc;
+        remove(tmp);
+        if (size < 0 || !write_save_stream(src, size, tmp, size, &crc))
+            r = DSAVE_ERR_IO;
+        else if (!matches(tmp, crc, size))
+            r = DSAVE_ERR_VERIFY;
+        else if ((file_exists(target) && remove(target) != 0) || rename(tmp, target) != 0)
+            r = DSAVE_ERR_IO;
+        if (r != DSAVE_OK)
+        {
+            remove(tmp);
+            return r;
+        }
+        if (!done++ && out_path)
+            snprintf(out_path, out_size, "%s", target);
+    }
+    return done ? DSAVE_OK : DSAVE_ERR_NO_SAVE;
+}
+
 DsaveResult backup_export(const Library *lib, const Game *game, const Backup *b, ExportFormat format,
                           char *out_path, size_t out_size)
 {
+    if (game->info.dsiware)
+        return format == EXPORT_DSV ? DSAVE_ERR_DSIWARE : export_dsi(lib, game, b, out_path, out_size);
     DsaveResult r = backup_validate(b);
     if (r != DSAVE_OK)
         return r;
@@ -788,10 +1179,29 @@ int backup_prune_auto(const Library *lib, const Game *game, int keep, const char
 // ---------------------------------------------------------------------------
 // Import
 
+// Which DSiWare part a file named "<rom>.pub", ".prv" or ".bnr" is, or -1.
+static int dsi_ext(const char *name)
+{
+    for (int p = 0; p < DSI_PARTS; p++)
+    {
+        if (has_ext(name, part_exts[p]))
+            return p;
+    }
+    return -1;
+}
+
 static bool importable(const char *name)
 {
     return has_ext(name, ".sav") || has_ext(name, ".dsv") || has_ext(name, ".sav.gz") || has_ext(name, ".duc") ||
-           has_ext(name, ".dss");
+           has_ext(name, ".dss") || dsi_ext(name) >= 0;
+}
+
+// path with its DSiWare extension swapped for part's. False if it doesn't fit.
+static bool dsi_sibling(const char *path, DsiPart part, char *out, size_t size)
+{
+    const char *dot = strrchr(path, '.');
+    int n = snprintf(out, size, "%.*s%s", (int)(dot ? dot - path : (long)strlen(path)), path, part_exts[part]);
+    return n >= 0 && (size_t)n < size;
 }
 
 // A file name without its save extension, and without ".nds" left over from
@@ -854,6 +1264,28 @@ int backup_import_list(const Library *lib, ImportFile *out, int max)
         snprintf(f->name, sizeof(f->name), "%s", e->d_name);
         if (!path_join(f->path, sizeof(f->path), dir, e->d_name) || !file_exists(f->path))
             continue;
+        f->dsiware = false;
+        int part = dsi_ext(f->name);
+        if (part >= 0)
+        {
+            // One entry per DSiWare save: skip a part whose earlier sibling
+            // (.pub before .prv before .bnr) is there.
+            bool first = true;
+            for (int q = 0; q < part && first; q++)
+            {
+                char sib[DSAVE_PATH_MAX];
+                first = !(dsi_sibling(f->path, (DsiPart)q, sib, sizeof(sib)) && file_exists(sib));
+            }
+            if (!first)
+                continue;
+            f->dsiware = true;
+            f->format = EMU_RAW;
+            f->size = file_size(f->path);
+            f->valid = f->size > 0;
+            f->game = match_rom(lib, f->name);
+            n++;
+            continue;
+        }
         EmuSave es = { .format = EMU_RAW, .length = -1 };
         if (savefile_is_gz(f->path))
             es.length = savefile_size(f->path);
@@ -870,10 +1302,39 @@ int backup_import_list(const Library *lib, ImportFile *out, int max)
     return n;
 }
 
+// Import a DSiWare save: the parts beside a .pub, .prv or .bnr (sidecar),
+// or one raw file as the title's main part (single). Every part must be the
+// size the title's header gives.
+static DsaveResult import_dsi(const Library *lib, const Game *game, const char *sidecar, const char *single,
+                              const char *label, const char *name, Backup *out)
+{
+    static char parts[DSI_PARTS][DSAVE_PATH_MAX];
+    DsiPart main_part = library_dsi_main_part(game);
+    for (int p = 0; p < DSI_PARTS; p++)
+    {
+        parts[p][0] = '\0';
+        if (sidecar && dsi_sibling(sidecar, (DsiPart)p, parts[p], sizeof(parts[p])) && !file_exists(parts[p]))
+            parts[p][0] = '\0';
+        else if (single && p == (int)main_part)
+            snprintf(parts[p], sizeof(parts[p]), "%s", single);
+        if (parts[p][0] && file_size(parts[p]) != rom_dsi_part_size(&game->info, (DsiPart)p))
+            return DSAVE_ERR_BAD_SIZE;
+    }
+    return create_dsi(lib, game, parts, label, name, true, out);
+}
+
 DsaveResult backup_import(const Library *lib, const Game *game, const char *path, Backup *out)
 {
     if (!file_exists(path))
         return DSAVE_ERR_NO_SAVE;
+    char base[DSAVE_PATH_MAX], stem[DSAVE_PATH_MAX], name[BACKUP_NAME_MAX + 1];
+    path_basename(base, sizeof(base), path);
+    import_stem(stem, sizeof(stem), base);
+    snprintf(name, sizeof(name), "import_%s", stem);
+    bool dsi = game->info.dsiware;
+    if (dsi_ext(path) >= 0)
+        return dsi ? import_dsi(lib, game, path, NULL, path, name, out) : DSAVE_ERR_WRONG_GAME;
+
     bool gz = savefile_is_gz(path);
     EmuSave es = { .format = EMU_RAW, .length = -1 };
     if (gz)
@@ -882,23 +1343,23 @@ DsaveResult backup_import(const Library *lib, const Game *game, const char *path
         return DSAVE_ERR_IO;
     if (es.length < 0)
         return gz ? DSAVE_ERR_CORRUPT : DSAVE_ERR_DAMAGED;
-    if (!is_valid_save_size(es.length))
+    if (!dsi && !is_valid_save_size(es.length))
         return DSAVE_ERR_BAD_SIZE;
 
-    char base[DSAVE_PATH_MAX], stem[DSAVE_PATH_MAX], name[BACKUP_NAME_MAX + 1];
-    path_basename(base, sizeof(base), path);
-    import_stem(stem, sizeof(stem), base);
-    snprintf(name, sizeof(name), "import_%s", stem);
-
-    if (gz || (es.format == EMU_RAW && es.length == file_size(path)))
+    bool raw = es.format == EMU_RAW && es.length == file_size(path);
+    if (!dsi && (gz || raw))
         return backup_create_labeled(lib, game, path, path, name, true, out);
+    if (dsi && !gz && raw)
+        return import_dsi(lib, game, NULL, path, path, name, out);
 
-    // Take the save data out of the emulator's file first.
+    // Take the save data out of the emulator's file (or the gzip) first.
     char tmp[DSAVE_PATH_MAX];
     if (!path_join(tmp, sizeof(tmp), lib->root, APP_DIR "/.import.tmp"))
         return DSAVE_ERR_PATH;
-    DsaveResult r = emusave_extract(path, &es, tmp) ? backup_create_labeled(lib, game, tmp, path, name, true, out)
-                                                     : es.packed ? DSAVE_ERR_DAMAGED : DSAVE_ERR_IO;
+    bool got = gz ? savefile_copy_raw(path, tmp) : emusave_extract(path, &es, tmp);
+    DsaveResult r = !got        ? (es.packed ? DSAVE_ERR_DAMAGED : DSAVE_ERR_IO)
+                    : dsi       ? import_dsi(lib, game, NULL, tmp, path, name, out)
+                                : backup_create_labeled(lib, game, tmp, path, name, true, out);
     remove(tmp);
     return r;
 }

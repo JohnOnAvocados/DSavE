@@ -46,11 +46,12 @@ static size_t feed_read(void *opaque, mz_uint64 ofs, void *buf, size_t n)
     return got;
 }
 
-static bool add_save(mz_zip_archive *zip, const char *name, const Backup *b)
+// Save data (raw or .gz) from path.
+static bool add_save(mz_zip_archive *zip, const char *name, const char *path)
 {
-    long size = savefile_size(b->file);
+    long size = savefile_size(path);
     Feed fd = { .pos = 0 };
-    if (size < 0 || !savefile_open(&fd.r, b->file))
+    if (size < 0 || !savefile_open(&fd.r, path))
         return false;
     MZ_TIME_T now = time(NULL);
     bool ok = mz_zip_writer_add_read_buf_callback(zip, name, feed_read, &fd, (mz_uint64)size, &now, NULL, 0,
@@ -106,11 +107,31 @@ static bool add_game(mz_zip_archive *zip, const Library *lib, const Game *g, con
             continue;
         }
         char name[DSAVE_PATH_MAX];
-        if (mode == ARCHIVE_NEWEST)
+        if (mode == ARCHIVE_NEWEST && g->info.dsiware)
+        {
+            // "<ROM name>.pub", ".prv" and ".bnr", as an export names them.
+            static const char *const exts[DSI_PARTS] = { ".pub", ".prv", ".bnr" };
+            char stem[DSAVE_PATH_MAX], part[DSAVE_PATH_MAX];
+            backup_export_stem(g, stem, sizeof(stem));
+            int k = 0;
+            for (int p = 0; p < DSI_PARTS; p++)
+            {
+                if (!backup_dsi_part_file(g, b, (DsiPart)p, part, sizeof(part)))
+                    continue;
+                // The first part picks the name; the others follow it.
+                if (!k++ && !unique_entry(zip, stem, exts[p], name, sizeof(name)))
+                    return false;
+                char entry[DSAVE_PATH_MAX];
+                snprintf(entry, sizeof(entry), "%.*s%s", (int)(strrchr(name, '.') - name), name, exts[p]);
+                if (!add_save(zip, entry, part))
+                    return false;
+            }
+        }
+        else if (mode == ARCHIVE_NEWEST)
         {
             char stem[DSAVE_PATH_MAX];
             backup_export_stem(g, stem, sizeof(stem));
-            if (!unique_entry(zip, stem, ".sav", name, sizeof(name)) || !add_save(zip, name, b))
+            if (!unique_entry(zip, stem, ".sav", name, sizeof(name)) || !add_save(zip, name, b->file))
                 return false;
         }
         else
@@ -120,8 +141,19 @@ static bool add_game(mz_zip_archive *zip, const Library *lib, const Game *g, con
             if (b->compressed && has_ext(file, SAVEFILE_GZ_EXT))
                 file[strlen(file) - strlen(SAVEFILE_GZ_EXT)] = '\0';
             snprintf(name, sizeof(name), "saves/%s/%s/%s", folder, b->name, file);
-            if (!add_save(zip, name, b))
+            if (!add_save(zip, name, b->file))
                 return false;
+            // A DSiWare backup's other parts, beside its main one.
+            for (int p = 0; b->dsiware && p < DSI_PARTS; p++)
+            {
+                char part[DSAVE_PATH_MAX];
+                const char *leaf = backup_dsi_part_name((DsiPart)p);
+                if (strcmp(leaf, file) == 0 || !backup_dsi_part_file(g, b, (DsiPart)p, part, sizeof(part)))
+                    continue;
+                snprintf(name, sizeof(name), "saves/%s/%s/%s", folder, b->name, leaf);
+                if (!add_save(zip, name, part))
+                    return false;
+            }
             if (b->has_meta && path_join(ini, sizeof(ini), b->dir, "backup.ini"))
             {
                 snprintf(name, sizeof(name), "saves/%s/%s/backup.ini", folder, b->name);

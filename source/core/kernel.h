@@ -11,6 +11,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "rom.h"
 #include "util.h"
 
 typedef enum {
@@ -104,6 +105,27 @@ int kernel_current_slot(const KernelSet *ks, KernelId id, const char *rom_path);
 
 // Highest slot number the kernel supports (0 = no slots).
 int kernel_max_slot(KernelId id);
+
+// How a kernel lays out a DSiWare title's save files (see rom.h, DsiPart).
+typedef enum {
+    DSI_LAYOUT_NONE,    // The kernel doesn't run DSiWare
+    DSI_LAYOUT_SIDECAR, // "<rom name>.pub", ".prv" and ".bnr": Pico Loader, and
+                        // TWiLight Menu++ running DSiWare in DSi mode
+    DSI_LAYOUT_SAV,     // "<rom name>.sav" holds the public save (the private one
+                        // if there is no public), plus ".bnr": TWiLight Menu++
+                        // running DSiWare through nds-bootstrap in DS mode
+} DsiLayout;
+
+// True for the kernels that run DSiWare: Pico Launcher, TWiLight Menu++, and
+// Generic (which follows Pico's naming).
+bool kernel_runs_dsiware(KernelId id);
+
+// The path kernel id uses for one save file of a DSiWare ROM, in the same
+// folder as its .sav (kernel_save_path). TWiLight's slot N uses ".puN",
+// ".prN" and ".bnN". In the SAV layout the public and private parts are the
+// same file. Returns false if the kernel has no such file.
+bool kernel_dsiware_path(const KernelSet *ks, KernelId id, const char *rom_path, int slot,
+                         DsiLayout layout, DsiPart part, char *out, size_t size);
 
 // Real chip size for a game code from Pico's save list, or -1 if unknown.
 // 0 means the list says the game has no save.

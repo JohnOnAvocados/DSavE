@@ -30,12 +30,123 @@ static bool skip_dir(const char *name)
     return false;
 }
 
-static void stat_loc(SaveLoc *loc)
+static bool stat_file(const char *path, long *size, time_t *mtime)
 {
     struct stat st;
-    loc->exists = stat(loc->path, &st) == 0 && S_ISREG(st.st_mode);
-    loc->size = loc->exists ? (long)st.st_size : -1;
-    loc->mtime = loc->exists ? st.st_mtime : 0;
+    if (stat(path, &st) != 0 || !S_ISREG(st.st_mode))
+        return false;
+    *size = (long)st.st_size;
+    *mtime = st.st_mtime;
+    return true;
+}
+
+bool library_stat_save(const Game *game, const char *path, long *size, time_t *mtime)
+{
+    long total = 0, s;
+    time_t newest = 0, t;
+    bool exists = false;
+    if (!game->info.dsiware)
+        exists = stat_file(path, &total, &newest);
+    for (int part = 0; game->info.dsiware && part < DSI_PARTS; part++)
+    {
+        char p[DSAVE_PATH_MAX];
+        if (!library_dsi_part_path(game, path, (DsiPart)part, p, sizeof(p)) || !stat_file(p, &s, &t))
+            continue;
+        exists = true;
+        total += s;
+        if (t > newest)
+            newest = t;
+    }
+    if (size)
+        *size = exists ? total : -1;
+    if (mtime)
+        *mtime = exists ? newest : 0;
+    return exists;
+}
+
+DsiPart library_dsi_main_part(const Game *game)
+{
+    for (int part = 0; part < DSI_PARTS; part++)
+    {
+        if (rom_dsi_has_part(&game->info, (DsiPart)part))
+            return (DsiPart)part;
+    }
+    return DSI_PARTS;
+}
+
+// The slot number in a DSiWare file's extension: ".pu3" or ".sav3" is
+// slot 3, ".pub" or ".sav" slot 0. *sav says the file is a .sav.
+static int dsi_slot(const char *path, bool *sav)
+{
+    const char *dot = strrchr(path, '.');
+    size_t n = dot ? strlen(dot) : 0;
+    *sav = dot && strncasecmp(dot, ".sav", 4) == 0 && (n == 4 || (n == 5 && dot[4] >= '0' && dot[4] <= '9'));
+    char last = n ? dot[n - 1] : 0;
+    return (n == (*sav ? 5u : 4u) && last >= '1' && last <= '9') ? last - '0' : 0;
+}
+
+bool library_dsi_part_path(const Game *game, const char *main_path, DsiPart part, char *out, size_t size)
+{
+    if (!game->info.dsiware || part >= DSI_PARTS || !rom_dsi_has_part(&game->info, part))
+        return false;
+    bool sav;
+    int slot = dsi_slot(main_path, &sav);
+    const char *dot = strrchr(main_path, '.');
+    if (!dot)
+        return false;
+    if (sav && part != DSI_BANNER)
+    {
+        // The SAV layout's one file holds the main part only.
+        if (part != library_dsi_main_part(game))
+            return false;
+        int n = snprintf(out, size, "%s", main_path);
+        return n >= 0 && (size_t)n < size;
+    }
+    static const char *const ext[DSI_PARTS] = { "pub", "prv", "bnr" };
+    int len = (int)(dot - main_path);
+    int n = slot ? snprintf(out, size, "%.*s.%.2s%d", len, main_path, ext[part], slot)
+                 : snprintf(out, size, "%.*s.%s", len, main_path, ext[part]);
+    return n >= 0 && (size_t)n < size;
+}
+
+// The layout kernel id keeps this DSiWare title's save in.
+static DsiLayout dsi_layout(const Library *lib, const Game *game, KernelId id, int slot)
+{
+    if (!kernel_runs_dsiware(id))
+        return DSI_LAYOUT_NONE;
+    if (id != KERNEL_TWILIGHT)
+        return DSI_LAYOUT_SIDECAR;
+    // TWiLight picks the layout at launch from the console and settings;
+    // the files it made show which one it uses here. (The banner save is
+    // the same file in both.)
+    const KernelSet *ks = &lib->kernels;
+    char path[DSAVE_PATH_MAX];
+    for (int part = 0; part < DSI_BANNER; part++)
+    {
+        if (rom_dsi_has_part(&game->info, (DsiPart)part) &&
+            kernel_dsiware_path(ks, id, game->rom_path, slot, DSI_LAYOUT_SIDECAR, (DsiPart)part, path,
+                                sizeof(path)) &&
+            file_exists(path))
+            return DSI_LAYOUT_SIDECAR;
+    }
+    if (kernel_save_path(ks, id, game->rom_path, slot, path, sizeof(path)) && file_exists(path))
+        return DSI_LAYOUT_SAV;
+    return lib->dsi_mode ? DSI_LAYOUT_SIDECAR : DSI_LAYOUT_SAV;
+}
+
+bool library_kernel_path(const Library *lib, const Game *game, KernelId id, int slot, char *out,
+                         size_t size)
+{
+    if (!game->info.dsiware)
+        return kernel_save_path(&lib->kernels, id, game->rom_path, slot, out, size);
+    DsiPart part = library_dsi_main_part(game);
+    return part < DSI_PARTS && kernel_dsiware_path(&lib->kernels, id, game->rom_path, slot,
+                                                   dsi_layout(lib, game, id, slot), part, out, size);
+}
+
+static void stat_loc(const Game *game, SaveLoc *loc)
+{
+    loc->exists = library_stat_save(game, loc->path, &loc->size, &loc->mtime);
 }
 
 int library_loc_for_kernel(const Game *game, KernelId id)
@@ -61,7 +172,7 @@ void library_refresh_game(const Library *lib, Game *game)
             continue;
         char path[DSAVE_PATH_MAX];
         int slot = kernel_current_slot(ks, (KernelId)k, game->rom_path);
-        if (!kernel_save_path(ks, (KernelId)k, game->rom_path, slot, path, sizeof(path)))
+        if (!library_kernel_path(lib, game, (KernelId)k, slot, path, sizeof(path)))
             continue;
 
         // Merge kernels that use the same file.
@@ -77,7 +188,7 @@ void library_refresh_game(const Library *lib, Game *game)
             SaveLoc *loc = &game->locs[found];
             memset(loc, 0, sizeof(*loc));
             snprintf(loc->path, sizeof(loc->path), "%s", path);
-            stat_loc(loc);
+            stat_loc(game, loc);
         }
         if (found >= 0)
             game->locs[found].kernels |= KERNEL_BIT(k);
