@@ -69,6 +69,19 @@ void gfx_fill(Canvas *c, int x, int y, int w, int h, Color col)
     }
 }
 
+void gfx_indexed(Canvas *c, int x, int y, int w, int h, const uint8_t *px, const uint16_t *pal, int scale)
+{
+    for (int yy = 0; yy < h; yy++)
+    {
+        for (int xx = 0; xx < w; xx++)
+        {
+            uint8_t i = px[yy * w + xx];
+            if (i)
+                gfx_fill(c, x + xx * scale, y + yy * scale, scale, scale, (Color)(pal[i] | 0x8000));
+        }
+    }
+}
+
 // Coverage (0-256) of pixel (px, py) by a circle of radius r centred at
 // (cx, cy), all in quarter pixels; 4x4 samples per pixel.
 static int coverage(int px, int py, int cx, int cy, int r)

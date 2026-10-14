@@ -56,6 +56,9 @@ void gfx_fill(Canvas *c, int x, int y, int w, int h, Color col);
 void gfx_rrect(Canvas *c, int x, int y, int w, int h, int r, Color col);
 // Rounded rectangle with a one-pixel border.
 void gfx_rrect_border(Canvas *c, int x, int y, int w, int h, int r, Color border, Color fill);
+// Paletted pixels (one byte each, index 0 transparent) with a BGR555
+// palette, each pixel drawn as a scale x scale block.
+void gfx_indexed(Canvas *c, int x, int y, int w, int h, const uint8_t *px, const uint16_t *pal, int scale);
 // Antialiased disc in the d x d box at (x, y).
 void gfx_disc(Canvas *c, int x, int y, int d, Color col);
 // Same, as a ring of the given thickness.
