@@ -44,18 +44,23 @@ static void probe_nocash(const uint8_t *h, long got, long file, EmuSave *out)
     uint32_t method = get32(h + 0x44);
     if (method == 0)
     {
+        uint32_t length = get32(h + 0x48);
+        if (length == 0 || length > (uint32_t)MAX_SAVE)
+            return;
         out->offset = 0x4C;
-        out->packed_size = (long)get32(h + 0x48);
+        out->packed_size = (long)length;
         out->length = out->packed_size;
     }
     else if (method == 1 && got >= NOCASH_HEADER)
     {
         out->packed = true;
         out->offset = NOCASH_HEADER;
-        out->packed_size = (long)get32(h + 0x48);
-        out->length = (long)get32(h + 0x4C);
-        if (out->packed_size <= 0 || out->packed_size > out->length * 2 + 1)
-            out->length = -1;
+        uint32_t packed = get32(h + 0x48), length = get32(h + 0x4C);
+        // Range-check before any arithmetic: long is 32 bits on the DS.
+        if (length == 0 || length > (uint32_t)MAX_SAVE || packed == 0 || packed > length * 2 + 1)
+            return;
+        out->packed_size = (long)packed;
+        out->length = (long)length;
     }
     if (out->length <= 0 || out->length > MAX_SAVE || out->packed_size > file - out->offset)
         out->length = -1;
