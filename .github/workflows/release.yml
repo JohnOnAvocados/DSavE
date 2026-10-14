@@ -2,11 +2,26 @@ name: Release
 
 # Push a tag like v0.2.0 to build DSavE.nds and publish it as a GitHub
 # Release. The tag must match APP_VERSION in source/ui/app.h.
+#
+# The release can also be started from the Actions tab ("Run workflow"):
+# give the tag and the branch or commit to release, and the workflow
+# creates the tag there. If docs/releases/<tag>.md exists, it becomes
+# the release notes (a first line "# Title" becomes the title);
+# otherwise GitHub generates them.
 
 on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to create and release, e.g. v0.3.0"
+        required: true
+      ref:
+        description: "Branch or commit to release"
+        required: true
+        default: main
 
 permissions:
   contents: write
@@ -15,21 +30,48 @@ jobs:
   release:
     runs-on: ubuntu-latest
     container: skylyrac/blocksds:slim-latest
+    env:
+      TAG: ${{ inputs.tag || github.ref_name }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+      # Release notes are read from the branch the workflow runs from, so
+      # they can be added without changing the commit being released.
+      - uses: actions/checkout@v4
+        with:
+          path: .release-notes
+          sparse-checkout: docs/releases
       - name: Check the tag matches APP_VERSION
         run: |
           version=$(sed -n 's/^#define APP_VERSION "\(.*\)"/\1/p' source/ui/app.h)
-          tag="${GITHUB_REF_NAME#v}"
+          tag="${TAG#v}"
           echo "APP_VERSION=$version tag=$tag"
           case "$tag" in
             "$version"|"$version"-*) ;;
-            *) echo "Tag $GITHUB_REF_NAME does not match APP_VERSION $version"; exit 1 ;;
+            *) echo "Tag $TAG does not match APP_VERSION $version"; exit 1 ;;
           esac
+      - name: Find the release notes
+        id: notes
+        run: |
+          notes=".release-notes/docs/releases/$TAG.md"
+          if [ -f "$notes" ]; then
+            # A first line "# Title" becomes the release title.
+            title=$(sed -n '1s/^# //p' "$notes")
+            if [ -n "$title" ]; then
+              echo "title=$title" >> "$GITHUB_OUTPUT"
+              sed -i '1{/^# /d}' "$notes"
+            fi
+            echo "path=$notes" >> "$GITHUB_OUTPUT"
+          fi
       - name: Build DSavE.nds
         run: make
       - uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ env.TAG }}
+          target_commitish: ${{ inputs.ref }}
+          name: ${{ steps.notes.outputs.title }}
+          body_path: ${{ steps.notes.outputs.path }}
           files: DSavE.nds
-          prerelease: ${{ contains(github.ref_name, '-') }}
-          generate_release_notes: true
+          prerelease: ${{ contains(env.TAG, '-') }}
+          generate_release_notes: ${{ steps.notes.outputs.path == '' }}
